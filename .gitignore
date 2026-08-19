@@ -1,0 +1,31 @@
+# Spotify / CEF runtime — not redistributed
+*.dll
+*.exe
+*.pak
+*.dat
+*.bin
+*.sig
+/locales/
+/Apps/
+/toast_icon.png
+/vk_swiftshader_icd.json
+/dist/
+/_installer_test/
+
+# Unpacked client UI except the theme
+/_xpui/xpui.zip
+/_xpui/unpacked/*
+!/_xpui/unpacked/spotifly/
+!/_xpui/unpacked/spotifly/**
+
+# Local tools
+/_tools/*.exe
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
+*.tmp
+.vscode/
+.idea/
