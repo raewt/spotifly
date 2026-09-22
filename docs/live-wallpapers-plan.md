@@ -1,5 +1,7 @@
 # Live wallpaper runtime
 
+Status: implemented for Wallpaper Engine `video` and `web` projects.
+
 ## Current state
 
 Spotifly supports images, GIF, MP4 and WebM. Video is always muted and is
@@ -11,8 +13,8 @@ resumes when the window becomes visible and wallpaper mode is enabled.
 Wallpaper Engine projects are described by `project.json`. Spotifly can support
 these project types in stages:
 
-- `video`: import the file referenced by `project.json` and use the existing
-  muted video renderer.
+- `video`: stream the file referenced by `project.json` through the local host
+  with HTTP range support and use the existing muted video renderer.
 - `web`: run the referenced HTML project in an isolated wallpaper frame and
   provide compatibility shims for Wallpaper Engine's JavaScript APIs.
 - `scene`: not directly compatible. Scene projects need Wallpaper Engine's own
@@ -29,8 +31,9 @@ Wallpaper Engine web wallpapers register a callback through
 
 The required bridge consists of:
 
-1. A small native helper captures the Spotifly process audio through WASAPI
-   process loopback.
+1. A self-contained helper captures the Windows output mix through WASAPI
+   loopback. Process-only capture is a possible later enhancement, but the
+   current method works across supported Windows 10 and 11 builds.
 2. The helper computes 64 frequency bins for the left channel and 64 for the
    right channel.
 3. It sends the 128 normalized values to the wallpaper runtime about 30 times
@@ -49,16 +52,18 @@ only and is never played back by the wallpaper runtime.
 
 ## Security boundary
 
-Workshop web wallpapers are third-party code. They must run in an isolated
-frame with no Spotify tokens, cookies or privileged APIs. Local files should be
-served through a restricted virtual filesystem. Network access should be off by
-default and exposed only as an explicit user option.
+Workshop web wallpapers are third-party code. They run in a sandboxed frame
+with no Spotify tokens, cookies or privileged APIs. Files are served only from
+the selected project's directory by a loopback-only HTTP host. Existing web
+wallpapers retain network access because a number of Workshop projects depend
+on remote data.
 
 ## Performance targets
 
-- 30 FPS by default, optional 60 FPS.
+- Audio data is sent at about 30 updates per second.
 - No audio capture, decoding or animation while minimized.
 - One animation frame per spectrum update at most.
 - Release object URLs, decoders and audio capture sessions when changing a
   wallpaper.
-- Fall back to the current static wallpaper when a project fails to load.
+- Preserve the current static/custom wallpaper path when Wallpaper Host is not
+  available.

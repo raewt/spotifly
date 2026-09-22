@@ -69,6 +69,9 @@ try {
   if ($packedTheme.Contains('setAttribute("autoplay"')) {
     throw 'Wallpaper video still has autonomous autoplay enabled'
   }
+  if (-not $packedTheme.Contains('openWallpaperBrowser') -or -not $packedTheme.Contains('/api/activity')) {
+    throw 'Wallpaper Engine integration is missing from packed xpui.spa'
+  }
   if (@($verification.Entries | Where-Object { $_.FullName.Contains('\') }).Count -ne 0) {
     throw 'xpui.spa contains Windows path separators'
   }
@@ -78,6 +81,7 @@ try {
     SizeMB = [math]::Round((Get-Item -LiteralPath $destSpa).Length / 1MB, 2)
     Entries = $verification.Entries.Count
     LifecycleOptimization = $true
+    WallpaperEngineIntegration = $true
   }
 }
 finally {

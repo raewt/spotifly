@@ -1,7 +1,8 @@
 #define MyAppName "Spotifly"
-#define MyAppVersion "1.2.84.465"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Spotifly"
 #define MyAppExeName "Spotifly.exe"
+#define MyHostExeName "Spotifly.WallpaperHost.exe"
 
 [Setup]
 AppId={{E8B3C4A1-7D2F-4A91-9C6E-1F5B8A2D3E4F}
@@ -27,7 +28,7 @@ MinVersion=10.0
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 CloseApplications=yes
-CloseApplicationsFilter=Spotifly.exe
+CloseApplicationsFilter=Spotifly.exe,Spotifly.WallpaperHost.exe
 RestartApplications=no
 ChangesAssociations=no
 UsedUserAreasWarning=no
@@ -60,17 +61,19 @@ Source: "..\icudtl.dat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\v8_context_snapshot.bin"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\vk_swiftshader_icd.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\toast_icon.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\wallpaper-host\bin\Release\net8.0-windows\win-x64\publish\{#MyHostExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Apps\xpui.spa"; DestDir: "{app}\Apps"; Flags: ignoreversion
 Source: "..\Apps\login.spa"; DestDir: "{app}\Apps"; Flags: ignoreversion
 Source: "..\locales\*"; DestDir: "{app}\locales"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyHostExeName}"; Parameters: "--launch-client"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyHostExeName}"; Parameters: "--launch-client"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyHostExeName}"; Parameters: "--launch-client"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\Cache"

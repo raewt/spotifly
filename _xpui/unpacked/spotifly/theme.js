@@ -2,9 +2,11 @@
   "use strict";
 
   var KEY = "spotifly-settings";
-  var VER = 5;
+  var VER = 6;
   var DB_NAME = "spotifly";
   var STORE = "files";
+  var WALLPAPER_HOST = "http://127.0.0.1:17654";
+  var WALLPAPER_TOKEN = "spotifly-wallpaper-v1";
   var PRESETS = {
     cozy: { library: "#c9a6a0", main: "#efe4da", nowplaying: "#3e2b26", player: "#3e2b26", accent: "#b56a5c" },
     cocoa: { library: "#c4a882", main: "#f2e6d4", nowplaying: "#3c2e22", player: "#3c2e22", accent: "#c49a6c" },
@@ -41,16 +43,17 @@
     };
     try {
       var parsed = JSON.parse(localStorage.getItem(KEY) || "{}");
-      var migrated = parsed.v !== VER;
+      var legacyRanges = !parsed.v || parsed.v < 5;
       return {
         v: VER,
         jelly: parsed.jelly !== false,
         wallpaper: parsed.wallpaper !== false,
         harmony: parsed.harmony !== false,
         textAuto: parsed.textAuto !== false,
-        tint: migrated ? 28 : clamp(parsed.tint, 8, 70, 28),
-        blur: migrated ? 6 : clamp(parsed.blur, 0, 32, 6),
+        tint: legacyRanges ? 28 : clamp(parsed.tint, 8, 70, 28),
+        blur: legacyRanges ? 6 : clamp(parsed.blur, 0, 32, 6),
         preset: parsed.preset || "cozy",
+        engineWallpaper: parsed.engineWallpaper && parsed.engineWallpaper.id ? parsed.engineWallpaper : null,
         text: parsed.text || "#3a241c",
         textMuted: parsed.textMuted || "#6f534b",
         textPlayer: parsed.textPlayer || "#f6ebdf",
@@ -177,7 +180,7 @@
     return openDb().then(function (db) {
       return new Promise(function (resolve) {
         var tx = db.transaction(STORE, "readwrite");
-        tx.objectStore(STORE).delete("wallpaper");
+        tx.objectStore(STORE)["delete"]("wallpaper");
         tx.oncomplete = function () { resolve(); };
         tx.onerror = function () { resolve(); };
       });
@@ -204,15 +207,22 @@
   function stopWallpaperVideo() {
     var wall = document.getElementById("sf-wallpaper");
     var video = wall && wall.querySelector("video");
-    if (!video) return;
-    try { video.pause(); } catch (e) {}
-    video.removeAttribute("src");
-    try { video.load(); } catch (e2) {}
-    video.remove();
+    if (video) {
+      try { video.pause(); } catch (e) {}
+      video.removeAttribute("src");
+      try { video.load(); } catch (e2) {}
+      video.remove();
+    }
+    var frame = wall && wall.querySelector("iframe");
+    if (frame) {
+      frame.src = "about:blank";
+      frame.remove();
+    }
   }
 
   function wallpaperVideoShouldPlay() {
     return !!state.wallpaper &&
+      state.preset !== "original" &&
       !document.hidden &&
       document.visibilityState !== "hidden";
   }
@@ -223,17 +233,80 @@
     try { video.pause(); } catch (e) {}
   }
 
+  function suspendWallpaperRuntime() {
+    pauseWallpaperVideo();
+    var frame = document.querySelector("#sf-wallpaper iframe");
+    if (frame && frame.contentWindow) {
+      try { frame.contentWindow.postMessage({ type: "spotifly:visibility", visible: false }, "*"); } catch (e) {}
+    }
+    syncWallpaperHostActivity(false);
+  }
+
   function syncWallpaperVideoPlayback() {
     var video = document.querySelector("#sf-wallpaper video");
-    if (!video) return;
+    var shouldPlay = wallpaperVideoShouldPlay();
+    if (video) {
+      video.muted = true;
+      video.defaultMuted = true;
+      video.volume = 0;
+      if (!shouldPlay) pauseWallpaperVideo();
+      else video.play()["catch"](function () {});
+    }
+    var frame = document.querySelector("#sf-wallpaper iframe");
+    if (frame && frame.contentWindow) {
+      try { frame.contentWindow.postMessage({ type: "spotifly:visibility", visible: shouldPlay }, "*"); } catch (e) {}
+    }
+    syncWallpaperHostActivity(shouldPlay);
+  }
+
+  function hostRequest(path, options) {
+    options = options || {};
+    var headers = options.headers || {};
+    headers["X-Spotifly-Token"] = WALLPAPER_TOKEN;
+    options.headers = headers;
+    return fetch(WALLPAPER_HOST + path, options);
+  }
+
+  function syncWallpaperHostActivity(visible) {
+    if (!state.engineWallpaper) return;
+    hostRequest("/api/activity", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visible: !!visible }),
+      keepalive: true
+    })["catch"](function () {});
+  }
+
+  function mountWallpaperVideo(url) {
+    var root = document.documentElement;
+    var wall = wallpaperHost();
+    root.style.removeProperty("--sf-wall");
+    wall.style.removeProperty("background-image");
+    var video = document.createElement("video");
+    video.setAttribute("muted", "");
+    video.setAttribute("loop", "");
+    video.setAttribute("playsinline", "");
+    video.setAttribute("preload", "metadata");
     video.muted = true;
     video.defaultMuted = true;
+    video.loop = true;
+    video.autoplay = false;
+    video.playsInline = true;
+    video.controls = false;
     video.volume = 0;
-    if (!wallpaperVideoShouldPlay()) {
-      pauseWallpaperVideo();
-      return;
-    }
-    video.play().catch(function () {});
+    video.addEventListener("volumechange", function () {
+      if (!video.muted || video.volume) {
+        video.muted = true;
+        video.volume = 0;
+      }
+    });
+    video.addEventListener("error", function () {
+      try { video.remove(); } catch (e) {}
+    }, { once: true });
+    wall.appendChild(video);
+    video.src = url;
+    if (video.readyState >= 2) syncWallpaperVideoPlayback();
+    else video.addEventListener("canplay", syncWallpaperVideoPlayback, { once: true });
   }
 
   function applyWallpaperUrl(url) {
@@ -256,46 +329,176 @@
     wallUrl = URL.createObjectURL(blob);
     var root = document.documentElement;
     var wall = wallpaperHost();
+    stopWallpaperVideo();
     if (isVideoBlob(blob)) {
-      root.style.removeProperty("--sf-wall");
-      wall.style.backgroundImage = "none";
-      var video = wall.querySelector("video");
-      if (!video) {
-        video = document.createElement("video");
-        video.setAttribute("muted", "");
-        video.setAttribute("loop", "");
-        video.setAttribute("playsinline", "");
-        video.setAttribute("preload", "metadata");
-        video.muted = true;
-        video.defaultMuted = true;
-        video.loop = true;
-        video.autoplay = false;
-        video.playsInline = true;
-        video.controls = false;
-        video.volume = 0;
-        video.addEventListener("volumechange", function () {
-          if (!video.muted || video.volume) {
-            video.muted = true;
-            video.volume = 0;
-          }
-        });
-        wall.appendChild(video);
-      }
-      video.src = wallUrl;
-      video.muted = true;
-      video.volume = 0;
-      if (video.readyState >= 2) syncWallpaperVideoPlayback();
-      else video.addEventListener("canplay", syncWallpaperVideoPlayback, { once: true });
+      mountWallpaperVideo(wallUrl);
     } else {
-      stopWallpaperVideo();
       wall.style.removeProperty("background-image");
       root.style.setProperty("--sf-wall", "url(\"" + wallUrl + "\")");
     }
   }
 
+  function applyEngineWallpaper(project) {
+    if (!project || !project.entry) return;
+    if (wallUrl && wallUrl.indexOf("blob:") === 0) URL.revokeObjectURL(wallUrl);
+    wallUrl = project.entry;
+    stopWallpaperVideo();
+    var root = document.documentElement;
+    var wall = wallpaperHost();
+    root.style.removeProperty("--sf-wall");
+    wall.style.removeProperty("background-image");
+    if (project.type === "video") {
+      mountWallpaperVideo(project.entry);
+    } else if (project.type === "web") {
+      var frame = document.createElement("iframe");
+      frame.src = project.entry;
+      frame.title = project.title || "Wallpaper Engine";
+      frame.tabIndex = -1;
+      frame.setAttribute("aria-hidden", "true");
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+      frame.addEventListener("load", syncWallpaperVideoPlayback);
+      frame.addEventListener("error", function () { try { frame.remove(); } catch (e) {} }, { once: true });
+      wall.appendChild(frame);
+    }
+    syncWallpaperVideoPlayback();
+  }
+
   function loadWallpaper() {
+    if (state.engineWallpaper && state.engineWallpaper.entry) {
+      applyEngineWallpaper(state.engineWallpaper);
+      return;
+    }
     idbGet().then(function (blob) {
       if (blob) applyWallpaperBlob(blob);
+    });
+  }
+
+  function openWallpaperBrowser() {
+    var modal = document.getElementById("sf-we-modal");
+    if (!modal) return;
+    modal.classList.add("is-open");
+    modal.setAttribute("aria-hidden", "false");
+    if (window.__spotiflyWallpaperProjects) renderWallpaperProjects();
+    else loadWallpaperProjects(false);
+  }
+
+  function closeWallpaperBrowser() {
+    var modal = document.getElementById("sf-we-modal");
+    if (!modal) return;
+    modal.classList.remove("is-open");
+    modal.setAttribute("aria-hidden", "true");
+    window.setTimeout(function () {
+      var grid = document.getElementById("sf-we-grid");
+      if (grid && !modal.classList.contains("is-open")) grid.innerHTML = "";
+    }, 240);
+  }
+
+  function loadWallpaperProjects(refresh) {
+    var grid = document.getElementById("sf-we-grid");
+    var status = document.getElementById("sf-we-status");
+    if (!grid || !status) return;
+    status.textContent = "Ищу обои в библиотеках Steam…";
+    grid.innerHTML = "";
+    hostRequest("/api/projects" + (refresh ? "?refresh=1" : ""))
+      .then(function (response) {
+        if (!response.ok) throw new Error("host");
+        return response.json();
+      })
+      .then(function (data) {
+        window.__spotiflyWallpaperProjects = data.projects || [];
+        renderWallpaperProjects();
+      })
+      ["catch"](function () {
+        status.textContent = "Wallpaper Host не запущен. Открой Spotifly через обычный ярлык приложения.";
+      });
+  }
+
+  function renderWallpaperProjects() {
+    var projects = window.__spotiflyWallpaperProjects || [];
+    var grid = document.getElementById("sf-we-grid");
+    var status = document.getElementById("sf-we-status");
+    var search = document.getElementById("sf-we-search");
+    var allToggle = document.getElementById("sf-we-all");
+    if (!grid || !status) return;
+    var query = String(search && search.value || "").trim().toLowerCase();
+    var showAll = !!(allToggle && allToggle.checked);
+    var visible = projects.filter(function (project) {
+      if (!showAll && !project.supported) return false;
+      return !query || String(project.title || "").toLowerCase().indexOf(query) >= 0;
+    });
+    grid.innerHTML = "";
+    visible.forEach(function (project) {
+      var card = document.createElement("button");
+      card.type = "button";
+      card.className = "sf-we-card" + (project.supported ? "" : " is-disabled") +
+        (state.engineWallpaper && state.engineWallpaper.id === project.id ? " is-selected" : "");
+      card.disabled = !project.supported;
+      var media = document.createElement("span");
+      media.className = "sf-we-preview";
+      if (project.preview) {
+        var image = document.createElement("img");
+        image.src = project.preview;
+        image.alt = "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        media.appendChild(image);
+      }
+      var type = document.createElement("span");
+      type.className = "sf-we-type";
+      type.textContent = project.type === "web" ? (project.audio ? "WEB · AUDIO" : "WEB") :
+        project.type === "video" ? "VIDEO" : project.type === "scene" ? "SCENE" : "НЕ ПОДДЕРЖИВАЕТСЯ";
+      media.appendChild(type);
+      var title = document.createElement("span");
+      title.className = "sf-we-title";
+      title.textContent = project.title || ("Wallpaper " + project.id);
+      card.appendChild(media);
+      card.appendChild(title);
+      if (project.supported) {
+        card.addEventListener("click", function () {
+          state.engineWallpaper = {
+            id: project.id,
+            title: project.title,
+            type: project.type,
+            entry: project.entry
+          };
+          state.wallpaper = true;
+          save();
+          applyEngineWallpaper(state.engineWallpaper);
+          applyPalette();
+          var toggle = document.getElementById("sf-wall-on");
+          if (toggle) toggle.checked = true;
+          closeWallpaperBrowser();
+        });
+      }
+      grid.appendChild(card);
+    });
+    var supportedCount = projects.filter(function (project) { return project.supported; }).length;
+    status.textContent = visible.length ?
+      ("Найдено: " + projects.length + " · доступно: " + supportedCount + " · показано: " + visible.length) :
+      (projects.length ? "Ничего не найдено" : "Локальные проекты Wallpaper Engine не найдены");
+  }
+
+  function mountWallpaperBrowser() {
+    if (document.getElementById("sf-we-modal")) return;
+    var modal = document.createElement("div");
+    modal.id = "sf-we-modal";
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML =
+      '<div class="sf-we-backdrop"></div>' +
+      '<section class="sf-we-dialog" role="dialog" aria-modal="true" aria-label="Обои Wallpaper Engine">' +
+      '<header><div><strong>Wallpaper Engine</strong><small>Локальная библиотека Workshop</small></div><button type="button" id="sf-we-close" aria-label="Закрыть">×</button></header>' +
+      '<div class="sf-we-tools"><input id="sf-we-search" type="search" placeholder="Поиск по названию"><label><input id="sf-we-all" type="checkbox"> Показать scene</label><button type="button" id="sf-we-refresh">Обновить</button></div>' +
+      '<p id="sf-we-status"></p><div id="sf-we-grid"></div>' +
+      '<footer>Video и Web запускаются внутри Spotifly без звука. Scene пока требуют движок Wallpaper Engine.</footer>' +
+      '</section>';
+    document.body.appendChild(modal);
+    modal.querySelector(".sf-we-backdrop").addEventListener("click", closeWallpaperBrowser);
+    modal.querySelector("#sf-we-close").addEventListener("click", closeWallpaperBrowser);
+    modal.querySelector("#sf-we-refresh").addEventListener("click", function () { loadWallpaperProjects(true); });
+    modal.querySelector("#sf-we-search").addEventListener("input", renderWallpaperProjects);
+    modal.querySelector("#sf-we-all").addEventListener("change", renderWallpaperProjects);
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && modal.classList.contains("is-open")) closeWallpaperBrowser();
     });
   }
 
@@ -468,7 +671,7 @@
   function onPointerDown(event) {
     if (!state.jelly || reduced || event.button !== 0) return;
     var t = event.target;
-    if (!t || !t.closest || t.closest("#sf-root") || t.closest("#sf-panel")) return;
+    if (!t || !t.closest || t.closest("#sf-root") || t.closest("#sf-panel") || t.closest("#sf-we-modal")) return;
     var btn = t.closest("button, [role='button']");
     if (!btn || btn.closest('[role="slider"]') || btn.tagName === "INPUT") return;
     if (isPlayerControl(btn)) return;
@@ -596,12 +799,14 @@
       '<label class="sf-check"><span>Обои</span><input id="sf-wall-on" type="checkbox"' + (state.wallpaper ? " checked" : "") + "></label>" +
       '<label class="sf-row"><span>Тонировка</span><input id="sf-tint" type="range" min="8" max="70" value="' + state.tint + '"></label>' +
       '<label class="sf-row"><span>Блюр</span><input id="sf-blur" type="range" min="0" max="32" value="' + state.blur + '"></label>' +
+      '<button type="button" class="sf-we-open" id="sf-we-open">Выбрать из Wallpaper Engine</button>' +
       '<div class="sf-actions">' +
       '<label>Фото / видео<input id="sf-file" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,.gif,.mp4,.webm,.mov" hidden></label>' +
       '<button type="button" id="sf-wall-reset">Сброс обоев</button>' +
       "</div>";
     document.body.appendChild(root);
     document.body.appendChild(panel);
+    mountWallpaperBrowser();
     renderPresets();
     syncColors();
     pinCustomizer();
@@ -657,10 +862,13 @@
       save();
       applyPalette();
     });
+    panel.querySelector("#sf-we-open").addEventListener("click", openWallpaperBrowser);
     panel.querySelector("#sf-file").addEventListener("change", function () {
       var file = this.files && this.files[0];
       if (!file) return;
       idbSet(file).then(function () {
+        syncWallpaperHostActivity(false);
+        state.engineWallpaper = null;
         applyWallpaperBlob(file);
         state.wallpaper = true;
         save();
@@ -670,6 +878,9 @@
     });
     panel.querySelector("#sf-wall-reset").addEventListener("click", function () {
       idbClear().then(function () {
+        syncWallpaperHostActivity(false);
+        state.engineWallpaper = null;
+        save();
         applyWallpaperUrl("");
       });
     });
@@ -700,9 +911,9 @@
     document.addEventListener("visibilitychange", function () {
       syncWallpaperVideoPlayback();
     });
-    window.addEventListener("pagehide", pauseWallpaperVideo);
+    window.addEventListener("pagehide", suspendWallpaperRuntime);
     window.addEventListener("pageshow", syncWallpaperVideoPlayback);
-    document.addEventListener("freeze", pauseWallpaperVideo);
+    document.addEventListener("freeze", suspendWallpaperRuntime);
     document.addEventListener("resume", syncWallpaperVideoPlayback);
     restoreNativeWindowButtons();
     syncPawToHome();
@@ -737,6 +948,7 @@
         state.blocks = Object.assign({}, p);
         save();
         applyPalette();
+        syncWallpaperVideoPlayback();
         syncColors();
         renderPresets();
       });
