@@ -211,6 +211,31 @@
     video.remove();
   }
 
+  function wallpaperVideoShouldPlay() {
+    return !!state.wallpaper &&
+      !document.hidden &&
+      document.visibilityState !== "hidden";
+  }
+
+  function pauseWallpaperVideo() {
+    var video = document.querySelector("#sf-wallpaper video");
+    if (!video) return;
+    try { video.pause(); } catch (e) {}
+  }
+
+  function syncWallpaperVideoPlayback() {
+    var video = document.querySelector("#sf-wallpaper video");
+    if (!video) return;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.volume = 0;
+    if (!wallpaperVideoShouldPlay()) {
+      pauseWallpaperVideo();
+      return;
+    }
+    video.play().catch(function () {});
+  }
+
   function applyWallpaperUrl(url) {
     if (wallUrl && wallUrl.indexOf("blob:") === 0) URL.revokeObjectURL(wallUrl);
     wallUrl = url || "";
@@ -239,12 +264,12 @@
         video = document.createElement("video");
         video.setAttribute("muted", "");
         video.setAttribute("loop", "");
-        video.setAttribute("autoplay", "");
         video.setAttribute("playsinline", "");
+        video.setAttribute("preload", "metadata");
         video.muted = true;
         video.defaultMuted = true;
         video.loop = true;
-        video.autoplay = true;
+        video.autoplay = false;
         video.playsInline = true;
         video.controls = false;
         video.volume = 0;
@@ -259,9 +284,8 @@
       video.src = wallUrl;
       video.muted = true;
       video.volume = 0;
-      var play = function () { video.play().catch(function () {}); };
-      if (video.readyState >= 2) play();
-      else video.addEventListener("canplay", play, { once: true });
+      if (video.readyState >= 2) syncWallpaperVideoPlayback();
+      else video.addEventListener("canplay", syncWallpaperVideoPlayback, { once: true });
     } else {
       stopWallpaperVideo();
       wall.style.removeProperty("background-image");
@@ -621,15 +645,7 @@
       state.wallpaper = this.checked;
       save();
       applyPalette();
-      var video = document.querySelector("#sf-wallpaper video");
-      if (!video) return;
-      if (state.wallpaper) {
-        video.muted = true;
-        video.volume = 0;
-        video.play().catch(function () {});
-      } else {
-        video.pause();
-      }
+      syncWallpaperVideoPlayback();
     });
     panel.querySelector("#sf-tint").addEventListener("input", function () {
       state.tint = clamp(this.value, 8, 70, 28);
@@ -682,14 +698,12 @@
     });
     window.addEventListener("resize", placePanel);
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden) return;
-      var video = document.querySelector("#sf-wallpaper video");
-      if (video) {
-        video.muted = true;
-        video.volume = 0;
-        video.play().catch(function () {});
-      }
+      syncWallpaperVideoPlayback();
     });
+    window.addEventListener("pagehide", pauseWallpaperVideo);
+    window.addEventListener("pageshow", syncWallpaperVideoPlayback);
+    document.addEventListener("freeze", pauseWallpaperVideo);
+    document.addEventListener("resume", syncWallpaperVideoPlayback);
     restoreNativeWindowButtons();
     syncPawToHome();
     [400, 1600].forEach(function (ms) {
