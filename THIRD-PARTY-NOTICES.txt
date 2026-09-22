@@ -4,11 +4,19 @@ NAudio.Core and NAudio.Wasapi 2.2.1
 Copyright (c) 2023 Mark Heath
 https://github.com/naudio/NAudio
 
+SharpDX 4.2.0
+Copyright (c) 2010-2019 SharpDX - Alexandre Mutel
+https://github.com/sharpdx/SharpDX
+
+Steamworks.NET 2024.8.0
+Copyright (c) Riley Labrecque
+https://github.com/rlabrecque/Steamworks.NET
+
 .NET Runtime 8
 Copyright (c) .NET Foundation and Contributors
 https://github.com/dotnet/runtime
 
-Both components are distributed under the MIT License:
+These components are distributed under the MIT License:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

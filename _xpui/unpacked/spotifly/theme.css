@@ -66,18 +66,43 @@ html.sf-theme:not(.sf-original) .encore-bright-accent-set {
   overflow: hidden;
   background-image: var(--sf-wall, url("/spotifly/wallpaper.jpg"));
   background-size: cover;
-  background-position: center;
+  background-position: var(--sf-wall-x, 50%) var(--sf-wall-y, 50%);
 }
 
+.sf-wallpaper-stage {
+  position: absolute;
+  width: var(--sf-wall-scale, 100%);
+  height: var(--sf-wall-scale, 100%);
+  left: var(--sf-wall-x, 50%);
+  top: var(--sf-wall-y, 50%);
+  translate: calc(-1 * var(--sf-wall-x, 50%)) calc(-1 * var(--sf-wall-y, 50%));
+  overflow: hidden;
+}
+
+.sf-wallpaper-image,
 #sf-wallpaper video,
 #sf-wallpaper iframe {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
   pointer-events: none;
   border: 0;
+}
+
+.sf-wallpaper-image {
+  background-repeat: no-repeat;
+  background-size: var(--sf-wall-fit, cover);
+  background-position: var(--sf-wall-x, 50%) var(--sf-wall-y, 50%);
+}
+
+#sf-wallpaper iframe {
+  transform-origin: 0 0;
+}
+
+#sf-wallpaper video {
+  object-fit: var(--sf-wall-fit, cover);
+  object-position: var(--sf-wall-x, 50%) var(--sf-wall-y, 50%);
 }
 
 html.sf-theme:not(.sf-wallpaper) #sf-wallpaper {
@@ -443,6 +468,10 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
   border: 1px solid rgba(255, 255, 255, 0.28);
   box-shadow: 0 16px 36px rgba(40, 24, 20, 0.28);
   z-index: 2147483000;
+  max-height: calc(100vh - 76px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-10px) scale(0.96);
@@ -495,6 +524,32 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
 }
 
 .sf-row input[type="range"] { width: 120px; }
+
+.sf-row select {
+  max-width: 128px;
+  height: 27px;
+  border: 1px solid color-mix(in srgb, var(--sf-ink) 12%, transparent);
+  border-radius: 8px;
+  padding: 0 7px;
+  background: color-mix(in srgb, var(--sf-main) 76%, transparent);
+  color: var(--sf-ink);
+  font-size: 11px;
+}
+
+.sf-wall-layout {
+  margin: 8px 0 2px;
+  padding: 7px 9px 4px;
+  border: 1px solid color-mix(in srgb, var(--sf-ink) 10%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--sf-library) 18%, transparent);
+}
+
+.sf-wall-layout summary {
+  cursor: pointer;
+  color: var(--sf-ink);
+  font-size: 11px;
+  font-weight: 650;
+}
 
 .sf-actions { display: flex; gap: 8px; margin-top: 8px; }
 .sf-actions button, .sf-actions label {
@@ -694,6 +749,64 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
   opacity: .52;
   cursor: not-allowed;
   filter: saturate(.65);
+}
+
+.sf-we-card.is-downloadable {
+  opacity: 1;
+  cursor: default;
+  filter: none;
+}
+
+.sf-we-card.is-downloadable:hover { transform: none; }
+
+.sf-we-download {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 7px;
+  padding: 0 2px;
+}
+
+.sf-we-progress {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--sf-ink) 10%, transparent);
+}
+
+.sf-we-progress i {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--sf-accent);
+  transition: width .25s ease;
+}
+
+.sf-we-download small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sf-muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sf-we-download button {
+  border: 0;
+  border-radius: 7px;
+  padding: 4px 7px;
+  background: color-mix(in srgb, var(--sf-accent) 24%, var(--sf-main));
+  color: var(--sf-ink);
+  font-size: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sf-we-download button:disabled {
+  opacity: .48;
+  cursor: default;
 }
 
 .sf-we-card.is-disabled:hover { transform: none; }

@@ -14,7 +14,7 @@ internal sealed record WallpaperProject(
     bool SupportsAudio,
     Dictionary<string, object?> Properties)
 {
-    public bool IsSupported => Type is "video" or "web";
+    public bool IsSupported => Type is "video" or "web" or "scene";
 }
 
 internal sealed class WallpaperCatalog
@@ -153,7 +153,7 @@ internal sealed class WallpaperCatalog
         }
     }
 
-    private static IEnumerable<string> FindSteamLibraries()
+    internal static IEnumerable<string> FindSteamLibraries()
     {
         var libraries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         AddIfDirectory(libraries, @"C:\Program Files (x86)\Steam");

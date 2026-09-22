@@ -12,15 +12,19 @@ internal sealed class LocalServer : IAsyncDisposable
     public const string ApiToken = "spotifly-wallpaper-v1";
     private readonly WallpaperCatalog _catalog;
     private readonly AudioSpectrumService _audio;
+    private readonly SceneCaptureService _scenes;
+    private readonly SteamWorkshopService _workshop;
     private readonly Func<System.Diagnostics.Process?> _launchClient;
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _listenLoop;
 
-    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, Func<System.Diagnostics.Process?> launchClient)
+    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, SceneCaptureService scenes, SteamWorkshopService workshop, Func<System.Diagnostics.Process?> launchClient)
     {
         _catalog = catalog;
         _audio = audio;
+        _scenes = scenes;
+        _workshop = workshop;
         _launchClient = launchClient;
         _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
     }
@@ -105,6 +109,12 @@ internal sealed class LocalServer : IAsyncDisposable
                 return;
             }
 
+            if (path.StartsWith("/workshop/", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWorkshopAssetAsync(context, path);
+                return;
+            }
+
             await SendStatusAsync(context.Response, 404);
         }
         catch
@@ -125,7 +135,8 @@ internal sealed class LocalServer : IAsyncDisposable
                 supported = _catalog.Projects.Count(project => project.IsSupported),
                 audioClients = _audio.ClientCount,
                 audioCapturing = _audio.IsCapturing,
-                visible = _audio.IsVisible
+                visible = _audio.IsVisible,
+                steamAvailable = _workshop.IsAvailable
             });
             return;
         }
@@ -137,17 +148,59 @@ internal sealed class LocalServer : IAsyncDisposable
                 _catalog.Refresh();
             }
 
-            var projects = _catalog.Projects.Select(project => new
+            HashSet<string> currentIds = _catalog.Projects.Select(project => project.Id).ToHashSet(StringComparer.Ordinal);
+            IReadOnlyList<WorkshopItem> subscribed = await _workshop.GetItemsAsync(
+                context.Request.QueryString["refresh"] == "1", currentIds, _shutdown.Token);
+            if (subscribed.Any(item => item.State == "installed" && !currentIds.Contains(item.Id)))
             {
-                id = project.Id,
-                title = project.Title,
-                type = project.Type,
-                supported = project.IsSupported,
-                audio = project.SupportsAudio,
-                preview = project.PreviewFile is null ? null : $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/preview",
-                entry = project.IsSupported ? BuildEntryUrl(project) : null
+                _catalog.Refresh();
+            }
+            Dictionary<string, WorkshopItem> subscribedById = subscribed.ToDictionary(item => item.Id, StringComparer.Ordinal);
+            var local = _catalog.Projects.Select(project =>
+            {
+                subscribedById.TryGetValue(project.Id, out WorkshopItem? item);
+                return new
+                {
+                    id = project.Id,
+                    title = project.Title,
+                    type = project.Type,
+                    supported = project.IsSupported,
+                    audio = project.SupportsAudio,
+                    installed = true,
+                    downloadable = false,
+                    downloadState = item?.State ?? "installed",
+                    downloaded = item?.Downloaded ?? 0,
+                    total = item?.Total ?? 0,
+                    preview = project.PreviewFile is null ? null : $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/preview",
+                    entry = project.IsSupported ? BuildEntryUrl(project) : null
+                };
             });
-            await SendJsonAsync(context.Response, new { projects });
+            HashSet<string> localIds = _catalog.Projects.Select(project => project.Id).ToHashSet(StringComparer.Ordinal);
+            var remote = subscribed.Where(item => !localIds.Contains(item.Id)).Select(item => new
+            {
+                id = item.Id,
+                title = item.Title,
+                type = "remote",
+                supported = false,
+                audio = false,
+                installed = false,
+                downloadable = item.Available,
+                downloadState = item.State,
+                downloaded = item.Downloaded,
+                total = item.Total > 0 ? item.Total : item.FileSize,
+                preview = item.PreviewUrl is null ? null : $"http://127.0.0.1:{Port}/workshop/{Uri.EscapeDataString(item.Id)}/preview",
+                entry = (string?)null
+            });
+            await SendJsonAsync(context.Response, new { projects = local.Concat(remote), steamAvailable = _workshop.IsAvailable });
+            return;
+        }
+
+        if (path.StartsWith("/api/download/", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        {
+            string id = Uri.UnescapeDataString(path["/api/download/".Length..]);
+            bool cancel = context.Request.QueryString["cancel"] == "1";
+            bool accepted = cancel ? _workshop.CancelDownload(id) : _workshop.StartDownload(id);
+            await SendJsonAsync(context.Response, new { accepted, id, action = cancel ? "cancel" : "download" });
             return;
         }
 
@@ -155,7 +208,13 @@ internal sealed class LocalServer : IAsyncDisposable
         {
             using JsonDocument document = await JsonDocument.ParseAsync(context.Request.InputStream);
             bool visible = document.RootElement.TryGetProperty("visible", out JsonElement value) && value.ValueKind == JsonValueKind.True;
+            string? sceneId = document.RootElement.TryGetProperty("sceneId", out JsonElement sceneValue) && sceneValue.ValueKind == JsonValueKind.String
+                ? sceneValue.GetString()
+                : null;
+            WallpaperProject? scene = sceneId is null ? null : _catalog.Find(sceneId);
+            if (scene?.Type != "scene") scene = null;
             _audio.SetVisible(visible);
+            await _scenes.SetActivityAsync(visible, scene);
             await SendStatusAsync(context.Response, 204);
             return;
         }
@@ -168,6 +227,27 @@ internal sealed class LocalServer : IAsyncDisposable
         }
 
         await SendStatusAsync(context.Response, 404);
+    }
+
+    private async Task HandleWorkshopAssetAsync(HttpListenerContext context, string path)
+    {
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 3 || !parts[2].Equals("preview", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendStatusAsync(context.Response, 404);
+            return;
+        }
+        var preview = await _workshop.GetPreviewAsync(Uri.UnescapeDataString(parts[1]), _shutdown.Token);
+        if (preview is null)
+        {
+            await SendStatusAsync(context.Response, 404);
+            return;
+        }
+        context.Response.ContentType = preview.Value.ContentType;
+        context.Response.Headers["Cache-Control"] = "public, max-age=3600";
+        context.Response.ContentLength64 = preview.Value.Bytes.Length;
+        await context.Response.OutputStream.WriteAsync(preview.Value.Bytes, _shutdown.Token);
+        context.Response.Close();
     }
 
     private async Task HandleWallpaperFileAsync(HttpListenerContext context, string path)
@@ -185,6 +265,24 @@ internal sealed class LocalServer : IAsyncDisposable
         if (project is null)
         {
             await SendStatusAsync(context.Response, 404);
+            return;
+        }
+
+        if (action.Equals("player", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
+        {
+            await SendVideoPlayerAsync(context.Response, project);
+            return;
+        }
+
+        if (action.Equals("scene", StringComparison.OrdinalIgnoreCase) && project.Type == "scene")
+        {
+            await SendScenePlayerAsync(context.Response, project);
+            return;
+        }
+
+        if (action.Equals("scene-stream", StringComparison.OrdinalIgnoreCase) && project.Type == "scene")
+        {
+            await SendSceneStreamAsync(context, project);
             return;
         }
 
@@ -294,11 +392,126 @@ internal sealed class LocalServer : IAsyncDisposable
 
     private static string BuildEntryUrl(WallpaperProject project)
     {
+        if (project.Type == "video")
+        {
+            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/player";
+        }
+        if (project.Type == "scene")
+        {
+            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/scene";
+        }
+
         string escapedPath = string.Join('/', project.EntryFile
             .Replace('\\', '/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .Select(Uri.EscapeDataString));
         return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/files/{escapedPath}";
+    }
+
+    private static async Task SendVideoPlayerAsync(HttpListenerResponse response, WallpaperProject project)
+    {
+        string escapedPath = string.Join('/', project.EntryFile
+            .Replace('\\', '/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Select(Uri.EscapeDataString));
+        string source = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/files/{escapedPath}";
+        string sourceJson = JsonSerializer.Serialize(source);
+        string html = $$"""
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;background:transparent}
+</style></head><body>
+<video id="wall" muted loop playsinline preload="auto"></video>
+<script>
+(()=>{
+  const video=document.getElementById('wall');
+  let active=true;
+  const mute=()=>{video.muted=true;video.defaultMuted=true;video.volume=0};
+  const sync=()=>{mute();if(active&&!document.hidden)video.play().catch(()=>{});else video.pause()};
+  video.src={{sourceJson}};
+  video.addEventListener('volumechange',mute);
+  video.addEventListener('canplay',()=>{sync();parent.postMessage({type:'spotifly:wallpaper-ready'},'*')},{once:true});
+  video.addEventListener('error',()=>parent.postMessage({type:'spotifly:wallpaper-error'},'*'));
+  addEventListener('message',event=>{
+    const data=event.data||{};
+    if(data.type==='spotifly:visibility'){active=!!data.visible;sync()}
+    if(data.type==='spotifly:layout'){
+      video.style.objectFit=data.fit==='contain'?'contain':data.fit==='fill'?'fill':'cover';
+      video.style.objectPosition=(Number(data.x)||50)+'% '+(Number(data.y)||50)+'%';
+    }
+  });
+  document.addEventListener('visibilitychange',sync);
+  mute();sync();
+})();
+</script></body></html>
+""";
+        response.Headers["Cache-Control"] = "no-store";
+        await SendTextAsync(response, html, "text/html; charset=utf-8");
+    }
+
+    private static async Task SendScenePlayerAsync(HttpListenerResponse response, WallpaperProject project)
+    {
+        string stream = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/scene-stream";
+        string streamJson = JsonSerializer.Serialize(stream);
+        string html = $$"""
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
+img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;background:transparent}
+</style></head><body><img id="wall" alt="">
+<script>
+(()=>{
+ const image=document.getElementById('wall'),source={{streamJson}};let active=true;
+ const sync=()=>{if(active&&!document.hidden){if(!image.src)image.src=source+'?v='+Date.now()} else {image.removeAttribute('src')} };
+ image.addEventListener('load',()=>parent.postMessage({type:'spotifly:wallpaper-ready'},'*'));
+ image.addEventListener('error',()=>{if(active)setTimeout(sync,1200)});
+ addEventListener('message',event=>{const data=event.data||{};
+   if(data.type==='spotifly:visibility'){active=!!data.visible;sync()}
+   if(data.type==='spotifly:layout'){image.style.objectFit=data.fit==='contain'?'contain':data.fit==='fill'?'fill':'cover';image.style.objectPosition=(Number(data.x)||50)+'% '+(Number(data.y)||50)+'%'}
+ });
+ document.addEventListener('visibilitychange',sync);sync();
+})();
+</script></body></html>
+""";
+        response.Headers["Cache-Control"] = "no-store";
+        await SendTextAsync(response, html, "text/html; charset=utf-8");
+    }
+
+    private async Task SendSceneStreamAsync(HttpListenerContext context, WallpaperProject project)
+    {
+        if (!await _scenes.EnsureStartedAsync(project, _shutdown.Token))
+        {
+            await SendStatusAsync(context.Response, 503);
+            return;
+        }
+
+        HttpListenerResponse response = context.Response;
+        response.ContentType = "multipart/x-mixed-replace; boundary=spotiflyframe";
+        response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+        response.SendChunked = true;
+        long version = -1;
+        try
+        {
+            await using Stream output = response.OutputStream;
+            while (!_shutdown.IsCancellationRequested)
+            {
+                version = await _scenes.WaitForFrameAsync(version, _shutdown.Token);
+                byte[]? frame = _scenes.LatestFrame;
+                if (frame is null) continue;
+                byte[] header = Encoding.ASCII.GetBytes(
+                    $"--spotiflyframe\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
+                await output.WriteAsync(header, _shutdown.Token);
+                await output.WriteAsync(frame, _shutdown.Token);
+                await output.WriteAsync("\r\n"u8.ToArray(), _shutdown.Token);
+                await output.FlushAsync(_shutdown.Token);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or HttpListenerException or OperationCanceledException)
+        {
+        }
     }
 
     private static bool IsAuthorized(HttpListenerRequest request) =>

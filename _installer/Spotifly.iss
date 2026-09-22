@@ -1,5 +1,5 @@
 #define MyAppName "Spotifly"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "Spotifly"
 #define MyAppExeName "Spotifly.exe"
 #define MyHostExeName "Spotifly.WallpaperHost.exe"
@@ -61,7 +61,7 @@ Source: "..\icudtl.dat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\v8_context_snapshot.bin"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\vk_swiftshader_icd.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\toast_icon.png"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\wallpaper-host\bin\Release\net8.0-windows\win-x64\publish\{#MyHostExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\wallpaper-host\bin\Release\net8.0-windows10.0.19041.0\win-x64\publish\{#MyHostExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Apps\xpui.spa"; DestDir: "{app}\Apps"; Flags: ignoreversion
 Source: "..\Apps\login.spa"; DestDir: "{app}\Apps"; Flags: ignoreversion
