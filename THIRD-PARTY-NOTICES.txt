@@ -8,6 +8,15 @@ SharpDX 4.2.0
 Copyright (c) 2010-2019 SharpDX - Alexandre Mutel
 https://github.com/sharpdx/SharpDX
 
+Quamotion.TurboJpegWrapper 2.0.32
+Copyright (c) Autonomic Systems and Quamotion
+https://github.com/quamotion/AS.TurboJpegWrapper
+
+libjpeg-turbo
+Copyright (c) 2009-2022 D. R. Commander and contributors
+https://github.com/libjpeg-turbo/libjpeg-turbo
+Distributed under the IJG and modified BSD licenses included with the package.
+
 Steamworks.NET 2024.8.0
 Copyright (c) Riley Labrecque
 https://github.com/rlabrecque/Steamworks.NET

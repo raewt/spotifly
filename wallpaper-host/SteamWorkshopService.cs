@@ -26,10 +26,10 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
     private nint _nativeLibrary;
     private bool _initialized;
     private string? _activeDownload;
+    private DateTime _lastUseUtc;
 
     public SteamWorkshopService()
     {
-        _ = TryInitialize();
         _callbackLoop = Task.Run(CallbackLoopAsync);
     }
 
@@ -41,6 +41,7 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
         PublishedFileId_t[] ids;
         lock (_sync)
         {
+            _lastUseUtc = DateTime.UtcNow;
             uint count = SteamUGC.GetNumSubscribedItems();
             ids = new PublishedFileId_t[count];
             uint actual = SteamUGC.GetSubscribedItems(ids, count);
@@ -89,6 +90,7 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
         if (!TryInitialize() || !ulong.TryParse(id, out ulong value)) return false;
         lock (_sync)
         {
+            _lastUseUtc = DateTime.UtcNow;
             if (_activeDownload is not null && _activeDownload != id)
             {
                 if (ulong.TryParse(_activeDownload, out ulong activeValue))
@@ -112,6 +114,7 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
         if (!_initialized) return false;
         lock (_sync)
         {
+            _lastUseUtc = DateTime.UtcNow;
             if (_activeDownload != id) return false;
             SteamUGC.SuspendDownloads(true);
             _cancelled.Add(id);
@@ -208,7 +211,26 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
                 if (!_initialized) continue;
                 lock (_sync)
                 {
-                    try { SteamAPI.RunCallbacks(); } catch { }
+                    try
+                    {
+                        SteamAPI.RunCallbacks();
+                        if (_activeDownload is not null && ulong.TryParse(_activeDownload, out ulong activeId))
+                        {
+                            EItemState state = (EItemState)SteamUGC.GetItemState(new PublishedFileId_t(activeId));
+                            if (state.HasFlag(EItemState.k_EItemStateInstalled) &&
+                                !state.HasFlag(EItemState.k_EItemStateDownloading) &&
+                                !state.HasFlag(EItemState.k_EItemStateDownloadPending))
+                            {
+                                _activeDownload = null;
+                                _lastUseUtc = DateTime.UtcNow;
+                            }
+                        }
+                        if (_activeDownload is null && DateTime.UtcNow - _lastUseUtc > TimeSpan.FromSeconds(12))
+                        {
+                            ShutdownSteamCore();
+                        }
+                    }
+                    catch { }
                 }
             }
         }
@@ -231,6 +253,7 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
                 Environment.SetEnvironmentVariable("SteamAppId", AppId);
                 Environment.SetEnvironmentVariable("SteamGameId", AppId);
                 _initialized = SteamAPI.Init();
+                if (_initialized) _lastUseUtc = DateTime.UtcNow;
             }
             catch { _initialized = false; }
             return _initialized;
@@ -253,12 +276,7 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
         try { await _callbackLoop; } catch { }
         lock (_sync)
         {
-            if (_initialized)
-            {
-                try { SteamUGC.SuspendDownloads(false); } catch { }
-                try { SteamAPI.Shutdown(); } catch { }
-                _initialized = false;
-            }
+            ShutdownSteamCore();
         }
         _http.Dispose();
         _shutdown.Dispose();
@@ -266,5 +284,13 @@ internal sealed class SteamWorkshopService : IAsyncDisposable
         {
             try { NativeLibrary.Free(_nativeLibrary); } catch { }
         }
+    }
+
+    private void ShutdownSteamCore()
+    {
+        if (!_initialized) return;
+        try { SteamUGC.SuspendDownloads(false); } catch { }
+        try { SteamAPI.Shutdown(); } catch { }
+        _initialized = false;
     }
 }

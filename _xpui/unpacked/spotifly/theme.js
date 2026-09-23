@@ -332,7 +332,8 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         visible: !!visible,
-        sceneId: state.engineWallpaper && state.engineWallpaper.type === "scene" ? state.engineWallpaper.id : null
+        sceneId: state.engineWallpaper && state.engineWallpaper.type === "scene" ? state.engineWallpaper.id : null,
+        videoId: state.engineWallpaper && state.engineWallpaper.type === "video" ? state.engineWallpaper.id : null
       }),
       keepalive: true
     })["catch"](function () {});
@@ -363,13 +364,19 @@
       }
     });
     video.addEventListener("error", function () {
+      var code = video.error && video.error.code || 0;
+      setWallpaperRuntimeStatus("VIDEO не воспроизводится (ошибка " + code + ")", true);
       try { video.remove(); } catch (e) {}
     }, { once: true });
     stage.appendChild(video);
     applyWallpaperLayout();
     video.src = url;
-    if (video.readyState >= 2) syncWallpaperVideoPlayback();
-    else video.addEventListener("canplay", syncWallpaperVideoPlayback, { once: true });
+    function ready() {
+      setWallpaperRuntimeStatus("", false);
+      syncWallpaperVideoPlayback();
+    }
+    if (video.readyState >= 2) ready();
+    else video.addEventListener("canplay", ready, { once: true });
   }
 
   function applyWallpaperUrl(url) {
@@ -414,7 +421,13 @@
   }
 
   function applyEngineWallpaper(project) {
-    if (!project || !project.entry) return;
+    if (!project || !project.id || !project.type) return;
+    if (project.type === "video") {
+      project.entry = WALLPAPER_HOST + "/wallpaper/" + encodeURIComponent(project.id) + "/video";
+    } else if (project.type === "scene") {
+      project.entry = WALLPAPER_HOST + "/wallpaper/" + encodeURIComponent(project.id) + "/scene";
+    }
+    if (!project.entry) return;
     if (wallUrl && wallUrl.indexOf("blob:") === 0) URL.revokeObjectURL(wallUrl);
     wallUrl = project.entry;
     stopWallpaperVideo();
@@ -431,8 +444,12 @@
       frame.tabIndex = -1;
       frame.setAttribute("aria-hidden", "true");
       frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+      setWallpaperRuntimeStatus("Запускаю " + project.type.toUpperCase() + "…", false);
       frame.addEventListener("load", function () { applyWallpaperLayout(); syncWallpaperVideoPlayback(); });
-      frame.addEventListener("error", function () { try { frame.remove(); } catch (e) {} }, { once: true });
+      frame.addEventListener("error", function () {
+        setWallpaperRuntimeStatus("Не удалось открыть эти обои", true);
+        try { frame.remove(); } catch (e) {}
+      }, { once: true });
       stage.appendChild(frame);
     }
     applyWallpaperLayout();
@@ -447,6 +464,23 @@
     idbGet().then(function (blob) {
       if (blob) applyWallpaperBlob(blob);
     });
+  }
+
+  function setWallpaperRuntimeStatus(message, error) {
+    var wall = wallpaperHost();
+    var status = wall.querySelector(".sf-wallpaper-runtime-status");
+    if (!status) {
+      status = document.createElement("div");
+      status.className = "sf-wallpaper-runtime-status";
+      wall.appendChild(status);
+    }
+    status.textContent = message || "";
+    status.classList.toggle("is-error", !!error);
+    status.classList.toggle("is-visible", !!message);
+    if (!error && message) {
+      window.clearTimeout(status.__hideTimer);
+      status.__hideTimer = window.setTimeout(function () { status.classList.remove("is-visible"); }, 5000);
+    }
   }
 
   function openWallpaperBrowser() {
@@ -569,7 +603,7 @@
     var query = String(search && search.value || "").trim().toLowerCase();
     var showAll = !!(allToggle && allToggle.checked);
     var visible = projects.filter(function (project) {
-      if (!showAll && !project.supported && !project.downloadable) return false;
+      if (!showAll && !project.supported && !project.downloadable && project.type !== "remote") return false;
       return !query || String(project.title || "").toLowerCase().indexOf(query) >= 0;
     });
     grid.innerHTML = "";
@@ -594,7 +628,7 @@
       type.textContent = project.type === "web" ? (project.audio ? "WEB · AUDIO" : "WEB") :
         project.type === "video" ? "VIDEO" : project.type === "scene" ? "SCENE" :
         project.downloadState === "downloading" ? "ЗАГРУЗКА" : project.downloadState === "pending" ? "ОЖИДАНИЕ" :
-        project.downloadState === "unavailable" ? "НЕДОСТУПНО В STEAM" : "В ОБЛАКЕ";
+        project.downloadState === "unavailable" ? "УДАЛЕНО ИЗ WORKSHOP" : "В ОБЛАКЕ";
       media.appendChild(type);
       var title = document.createElement("span");
       title.className = "sf-we-title";
@@ -641,19 +675,26 @@
         var activeDownload = project.downloadState === "downloading" || project.downloadState === "pending";
         var anotherDownload = !!wallpaperDownloadId && wallpaperDownloadId !== project.id;
         action.disabled = anotherDownload;
-        action.textContent = activeDownload ? "Отменить" : anotherDownload ? "Ожидает" : project.downloadState === "cancelled" ? "Продолжить" : "Скачать";
+        action.textContent = activeDownload ? "Остановить" : anotherDownload ? "Ожидает" : project.downloadState === "cancelled" ? "Продолжить" : "Скачать";
         action.addEventListener("click", function (event) { event.stopPropagation(); changeWallpaperDownload(project, activeDownload); });
         download.appendChild(progress);
         download.appendChild(detail);
         download.appendChild(action);
         card.appendChild(download);
+      } else if (project.downloadState === "unavailable") {
+        var unavailable = document.createElement("small");
+        unavailable.className = "sf-we-unavailable";
+        unavailable.textContent = "Steam больше не отдаёт этот файл";
+        card.appendChild(unavailable);
       }
       grid.appendChild(card);
     });
     var supportedCount = projects.filter(function (project) { return project.supported; }).length;
     var cloudCount = projects.filter(function (project) { return project.downloadable; }).length;
+    var unavailableCount = projects.filter(function (project) { return project.downloadState === "unavailable"; }).length;
     status.textContent = visible.length ?
-      ("Найдено: " + projects.length + " · установлено: " + supportedCount + (cloudCount ? " · в облаке: " + cloudCount : "") + " · показано: " + visible.length) :
+      ("Найдено: " + projects.length + " · установлено: " + supportedCount + " · можно скачать: " + cloudCount +
+        (unavailableCount ? " · удалено из Workshop: " + unavailableCount : "") + " · показано: " + visible.length) :
       (projects.length ? "Ничего не найдено" : "Локальные проекты Wallpaper Engine не найдены");
   }
 
@@ -666,7 +707,7 @@
       '<div class="sf-we-backdrop"></div>' +
       '<section class="sf-we-dialog" role="dialog" aria-modal="true" aria-label="Обои Wallpaper Engine">' +
       '<header><div><strong>Wallpaper Engine</strong><small>Локальная библиотека Workshop</small></div><button type="button" id="sf-we-close" aria-label="Закрыть">×</button></header>' +
-      '<div class="sf-we-tools"><input id="sf-we-search" type="search" placeholder="Поиск по названию"><label><input id="sf-we-all" type="checkbox"> Показать повреждённые</label><button type="button" id="sf-we-refresh">Обновить</button></div>' +
+      '<div class="sf-we-tools"><input id="sf-we-search" type="search" placeholder="Поиск по названию"><label><input id="sf-we-all" type="checkbox"> Показать неподдерживаемые</label><button type="button" id="sf-we-refresh">Обновить</button></div>' +
       '<p id="sf-we-status"></p><div id="sf-we-grid"></div>' +
       '<footer>Video, Web и Scene работают внутри Spotifly без собственного звука. Scene используют установленный Wallpaper Engine.</footer>' +
       '</section>';
@@ -1111,6 +1152,14 @@
     window.addEventListener("resize", placePanel);
     document.addEventListener("visibilitychange", function () {
       syncWallpaperVideoPlayback();
+    });
+    window.addEventListener("message", function (event) {
+      if (event.origin !== WALLPAPER_HOST || !event.data) return;
+      if (event.data.type === "spotifly:wallpaper-ready") {
+        setWallpaperRuntimeStatus("", false);
+      } else if (event.data.type === "spotifly:wallpaper-error") {
+        setWallpaperRuntimeStatus(event.data.message || "Обои не удалось воспроизвести", true);
+      }
     });
     window.addEventListener("pagehide", suspendWallpaperRuntime);
     window.addEventListener("pageshow", syncWallpaperVideoPlayback);

@@ -13,17 +13,19 @@ internal sealed class LocalServer : IAsyncDisposable
     private readonly WallpaperCatalog _catalog;
     private readonly AudioSpectrumService _audio;
     private readonly SceneCaptureService _scenes;
+    private readonly VideoCaptureService _videos;
     private readonly SteamWorkshopService _workshop;
     private readonly Func<System.Diagnostics.Process?> _launchClient;
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _listenLoop;
 
-    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, SceneCaptureService scenes, SteamWorkshopService workshop, Func<System.Diagnostics.Process?> launchClient)
+    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, SceneCaptureService scenes, VideoCaptureService videos, SteamWorkshopService workshop, Func<System.Diagnostics.Process?> launchClient)
     {
         _catalog = catalog;
         _audio = audio;
         _scenes = scenes;
+        _videos = videos;
         _workshop = workshop;
         _launchClient = launchClient;
         _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
@@ -130,13 +132,34 @@ internal sealed class LocalServer : IAsyncDisposable
             await SendJsonAsync(context.Response, new
             {
                 ready = true,
-                version = "1",
+                version = "1.5.0",
                 projects = _catalog.Projects.Count,
                 supported = _catalog.Projects.Count(project => project.IsSupported),
                 audioClients = _audio.ClientCount,
                 audioCapturing = _audio.IsCapturing,
                 visible = _audio.IsVisible,
-                steamAvailable = _workshop.IsAvailable
+                steamAvailable = _workshop.IsAvailable,
+                scene = new
+                {
+                    activeProjectId = _scenes.ActiveProjectId,
+                    width = _scenes.CaptureWidth,
+                    height = _scenes.CaptureHeight,
+                    encodeMilliseconds = Math.Round(_scenes.EncodeMilliseconds, 2),
+                    frameBytes = _scenes.LatestFrame?.Length ?? 0,
+                    frameVersion = _scenes.FrameVersion,
+                    error = _scenes.LastError
+                },
+                video = new
+                {
+                    activeProjectId = _videos.ActiveProjectId,
+                    playing = _videos.IsPlaying,
+                    width = _videos.CaptureWidth,
+                    height = _videos.CaptureHeight,
+                    encodeMilliseconds = Math.Round(_videos.EncodeMilliseconds, 2),
+                    frameBytes = _videos.LatestFrame?.Length ?? 0,
+                    frameVersion = _videos.FrameVersion,
+                    error = _videos.LastError
+                }
             });
             return;
         }
@@ -211,10 +234,20 @@ internal sealed class LocalServer : IAsyncDisposable
             string? sceneId = document.RootElement.TryGetProperty("sceneId", out JsonElement sceneValue) && sceneValue.ValueKind == JsonValueKind.String
                 ? sceneValue.GetString()
                 : null;
+            string? videoId = document.RootElement.TryGetProperty("videoId", out JsonElement videoValue) && videoValue.ValueKind == JsonValueKind.String
+                ? videoValue.GetString()
+                : null;
             WallpaperProject? scene = sceneId is null ? null : _catalog.Find(sceneId);
             if (scene?.Type != "scene") scene = null;
+            WallpaperProject? video = videoId is null ? null : _catalog.Find(videoId);
+            if (video?.Type != "video") video = null;
+            if (video is not null && Path.GetExtension(video.EntryFile).Equals(".webm", StringComparison.OrdinalIgnoreCase))
+            {
+                video = null;
+            }
             _audio.SetVisible(visible);
             await _scenes.SetActivityAsync(visible, scene);
+            await _videos.SetActivityAsync(visible, video);
             await SendStatusAsync(context.Response, 204);
             return;
         }
@@ -271,6 +304,40 @@ internal sealed class LocalServer : IAsyncDisposable
         if (action.Equals("player", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
         {
             await SendVideoPlayerAsync(context.Response, project);
+            return;
+        }
+
+        if (action.Equals("video-file", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
+        {
+            string? videoPath = WallpaperCatalog.SafeCombine(project.RootPath, project.EntryFile);
+            if (videoPath is null || !File.Exists(videoPath))
+            {
+                await SendStatusAsync(context.Response, 404);
+                return;
+            }
+
+            context.Response.ContentType = MimeType(Path.GetExtension(videoPath).ToLowerInvariant());
+            context.Response.Headers["Cache-Control"] = "public, max-age=3600";
+            await SendFileAsync(context, videoPath);
+            return;
+        }
+
+        if (action.Equals("video", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
+        {
+            if (Path.GetExtension(project.EntryFile).Equals(".webm", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendVideoPlayerAsync(context.Response, project);
+            }
+            else
+            {
+                await SendStreamPlayerAsync(context.Response, project, "video-stream");
+            }
+            return;
+        }
+
+        if (action.Equals("video-stream", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
+        {
+            await SendVideoStreamAsync(context, project);
             return;
         }
 
@@ -354,6 +421,7 @@ internal sealed class LocalServer : IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
         {
             string[] bounds = range[6..].Split(',', 2)[0].Split('-', 2);
+            bool valid = false;
             if (bounds.Length == 2 && long.TryParse(bounds[0], out long requestedStart))
             {
                 start = Math.Clamp(requestedStart, 0, file.Length - 1);
@@ -361,9 +429,25 @@ internal sealed class LocalServer : IAsyncDisposable
                 {
                     end = Math.Clamp(requestedEnd, start, file.Length - 1);
                 }
-                context.Response.StatusCode = (int)HttpStatusCode.PartialContent;
-                context.Response.Headers["Content-Range"] = $"bytes {start}-{end}/{file.Length}";
+                valid = requestedStart < file.Length;
             }
+            else if (bounds.Length == 2 && long.TryParse(bounds[1], out long suffixLength) && suffixLength > 0)
+            {
+                suffixLength = Math.Min(suffixLength, file.Length);
+                start = file.Length - suffixLength;
+                end = file.Length - 1;
+                valid = true;
+            }
+
+            if (!valid)
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                context.Response.Headers["Content-Range"] = $"bytes */{file.Length}";
+                context.Response.Close();
+                return;
+            }
+            context.Response.StatusCode = (int)HttpStatusCode.PartialContent;
+            context.Response.Headers["Content-Range"] = $"bytes {start}-{end}/{file.Length}";
         }
 
         long remaining = end - start + 1;
@@ -394,7 +478,7 @@ internal sealed class LocalServer : IAsyncDisposable
     {
         if (project.Type == "video")
         {
-            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/player";
+            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/video";
         }
         if (project.Type == "scene")
         {
@@ -416,7 +500,8 @@ internal sealed class LocalServer : IAsyncDisposable
             .Select(Uri.EscapeDataString));
         string source = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/files/{escapedPath}";
         string sourceJson = JsonSerializer.Serialize(source);
-        string html = $$"""
+        string mimeJson = JsonSerializer.Serialize(MimeType(Path.GetExtension(project.EntryFile).ToLowerInvariant()));
+        string html = $$$"""
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -427,13 +512,17 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-p
 <script>
 (()=>{
   const video=document.getElementById('wall');
-  let active=true;
+  let active=true,ready=false,timeout=0;
   const mute=()=>{video.muted=true;video.defaultMuted=true;video.volume=0};
-  const sync=()=>{mute();if(active&&!document.hidden)video.play().catch(()=>{});else video.pause()};
-  video.src={{sourceJson}};
+  const reportError=message=>parent.postMessage({type:'spotifly:wallpaper-error',message},'*');
+  const armTimeout=()=>{clearTimeout(timeout);if(active&&!ready)timeout=setTimeout(()=>reportError('VIDEO не загрузилось за 12 секунд'),12000)};
+  const sync=()=>{mute();if(active&&!document.hidden){armTimeout();video.play().catch(error=>reportError('VIDEO: '+(error&&error.message||'воспроизведение заблокировано')))}else{clearTimeout(timeout);video.pause()}};
+  if(!video.canPlayType({{{mimeJson}}}))reportError('Этот видеоформат не поддерживается встроенным Chromium');
+  video.src={{{sourceJson}}};
+  video.load();
   video.addEventListener('volumechange',mute);
-  video.addEventListener('canplay',()=>{sync();parent.postMessage({type:'spotifly:wallpaper-ready'},'*')},{once:true});
-  video.addEventListener('error',()=>parent.postMessage({type:'spotifly:wallpaper-error'},'*'));
+  video.addEventListener('canplay',()=>{ready=true;clearTimeout(timeout);sync();parent.postMessage({type:'spotifly:wallpaper-ready'},'*')},{once:true});
+  video.addEventListener('error',()=>{const code=video.error&&video.error.code||0;reportError('VIDEO не воспроизводится (ошибка '+code+')')});
   addEventListener('message',event=>{
     const data=event.data||{};
     if(data.type==='spotifly:visibility'){active=!!data.visible;sync()}
@@ -453,7 +542,12 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-p
 
     private static async Task SendScenePlayerAsync(HttpListenerResponse response, WallpaperProject project)
     {
-        string stream = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/scene-stream";
+        await SendStreamPlayerAsync(response, project, "scene-stream");
+    }
+
+    private static async Task SendStreamPlayerAsync(HttpListenerResponse response, WallpaperProject project, string streamAction)
+    {
+        string stream = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/{streamAction}";
         string streamJson = JsonSerializer.Serialize(stream);
         string html = $$"""
 <!doctype html>
@@ -480,6 +574,21 @@ img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-pos
         await SendTextAsync(response, html, "text/html; charset=utf-8");
     }
 
+    private async Task SendVideoStreamAsync(HttpListenerContext context, WallpaperProject project)
+    {
+        if (!await _videos.EnsureStartedAsync(project, _shutdown.Token))
+        {
+            await SendStatusAsync(context.Response, 503);
+            return;
+        }
+
+        await SendMjpegStreamAsync(
+            context.Response,
+            () => _videos.FrameVersion,
+            version => _videos.WaitForFrameAsync(version, _shutdown.Token),
+            () => _videos.LatestFrame);
+    }
+
     private async Task SendSceneStreamAsync(HttpListenerContext context, WallpaperProject project)
     {
         if (!await _scenes.EnsureStartedAsync(project, _shutdown.Token))
@@ -488,18 +597,30 @@ img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-pos
             return;
         }
 
-        HttpListenerResponse response = context.Response;
+        await SendMjpegStreamAsync(
+            context.Response,
+            () => _scenes.FrameVersion,
+            version => _scenes.WaitForFrameAsync(version, _shutdown.Token),
+            () => _scenes.LatestFrame);
+    }
+
+    private async Task SendMjpegStreamAsync(
+        HttpListenerResponse response,
+        Func<long> currentVersion,
+        Func<long, Task<long>> waitForFrame,
+        Func<byte[]?> latestFrame)
+    {
         response.ContentType = "multipart/x-mixed-replace; boundary=spotiflyframe";
         response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
         response.SendChunked = true;
-        long version = -1;
+        long version = currentVersion() - 1;
         try
         {
             await using Stream output = response.OutputStream;
             while (!_shutdown.IsCancellationRequested)
             {
-                version = await _scenes.WaitForFrameAsync(version, _shutdown.Token);
-                byte[]? frame = _scenes.LatestFrame;
+                version = await waitForFrame(version);
+                byte[]? frame = latestFrame();
                 if (frame is null) continue;
                 byte[] header = Encoding.ASCII.GetBytes(
                     $"--spotiflyframe\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");

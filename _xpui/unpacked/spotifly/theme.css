@@ -105,6 +105,28 @@ html.sf-theme:not(.sf-original) .encore-bright-accent-set {
   object-position: var(--sf-wall-x, 50%) var(--sf-wall-y, 50%);
 }
 
+.sf-wallpaper-runtime-status {
+  position: absolute;
+  left: 50%;
+  bottom: 104px;
+  z-index: 3;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 999px;
+  background: rgba(18, 14, 13, .72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 650;
+  opacity: 0;
+  translate: -50% 6px;
+  transition: opacity .18s ease, translate .18s ease;
+  backdrop-filter: blur(14px);
+}
+
+.sf-wallpaper-runtime-status.is-visible { opacity: 1; translate: -50% 0; }
+.sf-wallpaper-runtime-status.is-error { border-color: rgba(255, 128, 128, .38); }
+
 html.sf-theme:not(.sf-wallpaper) #sf-wallpaper {
   display: none;
 }
@@ -807,6 +829,13 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
 .sf-we-download button:disabled {
   opacity: .48;
   cursor: default;
+}
+
+.sf-we-unavailable {
+  padding: 0 2px;
+  color: var(--sf-muted);
+  font-size: 9px;
+  line-height: 1.3;
 }
 
 .sf-we-card.is-disabled:hover { transform: none; }

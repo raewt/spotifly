@@ -1,5 +1,5 @@
 #define MyAppName "Spotifly"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "Spotifly"
 #define MyAppExeName "Spotifly.exe"
 #define MyHostExeName "Spotifly.WallpaperHost.exe"

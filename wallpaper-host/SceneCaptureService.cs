@@ -1,8 +1,7 @@
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
+using TurboJpegWrapper;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
@@ -18,6 +17,7 @@ internal sealed class SceneCaptureService : IAsyncDisposable
     private long _frameVersion;
     private byte[]? _latestFrame;
     private TaskCompletionSource<long> _nextFrame = NewFrameSignal();
+    private string? _lastError;
 
     public byte[]? LatestFrame
     {
@@ -31,6 +31,11 @@ internal sealed class SceneCaptureService : IAsyncDisposable
     }
 
     public long FrameVersion => Interlocked.Read(ref _frameVersion);
+    public string? ActiveProjectId => _capture?.ProjectId;
+    public int CaptureWidth => _capture?.Width ?? 0;
+    public int CaptureHeight => _capture?.Height ?? 0;
+    public double EncodeMilliseconds => _capture?.EncodeMilliseconds ?? 0;
+    public string? LastError => _lastError;
 
     public async Task<bool> EnsureStartedAsync(WallpaperProject project, CancellationToken cancellationToken)
     {
@@ -55,14 +60,27 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                 return false;
             }
 
-            var capture = new SceneCapture(project, engine, PublishFrame);
-            if (!await capture.StartAsync(cancellationToken))
+            var capture = new SceneCapture(project, engine, PublishFrame, ReportError);
+            bool started;
+            try
+            {
+                started = await capture.StartAsync(cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                ReportError(exception);
+                await capture.DisposeAsync();
+                return false;
+            }
+            if (!started)
             {
                 await capture.DisposeAsync();
+                _lastError ??= "Wallpaper Engine did not expose a capturable Scene window.";
                 return false;
             }
 
             _capture = capture;
+            _lastError = null;
             return true;
         }
         finally
@@ -118,6 +136,8 @@ internal sealed class SceneCaptureService : IAsyncDisposable
         completed.TrySetResult(version);
     }
 
+    private void ReportError(Exception exception) => _lastError = exception.ToString();
+
     private async Task StopCoreAsync()
     {
         SceneCapture? capture = _capture;
@@ -126,6 +146,7 @@ internal sealed class SceneCaptureService : IAsyncDisposable
         {
             await capture.DisposeAsync();
         }
+        lock (this) _latestFrame = null;
     }
 
     private static TaskCompletionSource<long> NewFrameSignal() =>
@@ -168,30 +189,40 @@ internal sealed class SceneCaptureService : IAsyncDisposable
 
     private sealed class SceneCapture : IAsyncDisposable
     {
-        private const int CaptureWidth = 1280;
-        private const int CaptureHeight = 720;
+        private const int CaptureWidth = 1920;
+        private const int CaptureHeight = 1080;
+        private const int CaptureFps = 30;
+        private const int JpegQuality = 92;
         private readonly WallpaperProject _project;
         private readonly string _engine;
         private readonly Action<byte[]> _publish;
+        private readonly Action<Exception> _reportError;
         private readonly string _windowName = $"Spotifly Scene {Environment.ProcessId}";
         private readonly object _frameLock = new();
+        private readonly TJCompressor _compressor = new();
+        private readonly HashSet<int> _ownedEngineProcesses = new();
         private IDirect3DDevice? _runtimeDevice;
         private SharpDX.Direct3D11.Device? _nativeDevice;
         private SharpDX.Direct3D11.Texture2D? _stagingTexture;
         private Direct3D11CaptureFramePool? _framePool;
         private GraphicsCaptureSession? _session;
         private long _lastFrameTicks;
+        private double _encodeMilliseconds;
         private bool _disposed;
-        private readonly List<(AudioSessionControl Session, bool WasMuted)> _mutedSessions = new();
+        private readonly List<(AudioSessionControl Session, bool WasMuted, float Volume)> _silencedSessions = new();
 
-        public SceneCapture(WallpaperProject project, string engine, Action<byte[]> publish)
+        public SceneCapture(WallpaperProject project, string engine, Action<byte[]> publish, Action<Exception> reportError)
         {
             _project = project;
             _engine = engine;
             _publish = publish;
+            _reportError = reportError;
         }
 
         public string ProjectId => _project.Id;
+        public int Width { get; private set; }
+        public int Height { get; private set; }
+        public double EncodeMilliseconds => Volatile.Read(ref _encodeMilliseconds);
 
         public async Task<bool> StartAsync(CancellationToken cancellationToken)
         {
@@ -206,6 +237,7 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                 await CloseWallpaperWindowAsync(staleWindow);
             }
 
+            HashSet<int> engineProcessesBefore = GetWallpaperEngineProcessIds();
             var start = new ProcessStartInfo
             {
                 FileName = _engine,
@@ -234,14 +266,24 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                 if (window == 0) await Task.Delay(120, cancellationToken);
             }
             if (window == 0) return false;
-            MuteWallpaperAudio();
-
+            if (engineProcessesBefore.Count == 0)
+            {
+                foreach (int processId in GetWallpaperEngineProcessIds())
+                {
+                    _ownedEngineProcesses.Add(processId);
+                }
+            }
             GraphicsCaptureItem item = GraphicsCaptureInterop.CreateItemForWindow(window);
+            var captureSize = item.Size;
+            Width = captureSize.Width;
+            Height = captureSize.Height;
+            ExcludeFromTaskbar(window);
+            SilenceWallpaperAudioWithoutMuting();
             (_runtimeDevice, _nativeDevice) = GraphicsCaptureInterop.CreateDevice();
             var description = new SharpDX.Direct3D11.Texture2DDescription
             {
-                Width = item.Size.Width,
-                Height = item.Size.Height,
+                Width = captureSize.Width,
+                Height = captureSize.Height,
                 MipLevels = 1,
                 ArraySize = 1,
                 Format = SharpDX.DXGI.Format.B8G8R8A8_UNorm,
@@ -251,16 +293,24 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                 CpuAccessFlags = SharpDX.Direct3D11.CpuAccessFlags.Read,
                 OptionFlags = SharpDX.Direct3D11.ResourceOptionFlags.None
             };
-            _stagingTexture = new SharpDX.Direct3D11.Texture2D(_nativeDevice, description);
+            try
+            {
+                _stagingTexture = new SharpDX.Direct3D11.Texture2D(_nativeDevice, description);
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot create Scene staging texture {captureSize.Width}x{captureSize.Height}.", exception);
+            }
             _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
-                _runtimeDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, item.Size);
+                _runtimeDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, captureSize);
             _session = _framePool.CreateCaptureSession(item);
             _framePool.FrameArrived += OnFrameArrived;
             _session.StartCapture();
             return true;
         }
 
-        private void MuteWallpaperAudio()
+        private void SilenceWallpaperAudioWithoutMuting()
         {
             try
             {
@@ -281,13 +331,15 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                             continue;
                         }
                         bool wasMuted = session.SimpleAudioVolume.Mute;
-                        session.SimpleAudioVolume.Mute = true;
-                        _mutedSessions.Add((session, wasMuted));
+                        float volume = session.SimpleAudioVolume.Volume;
+                        session.SimpleAudioVolume.Volume = 0f;
+                        session.SimpleAudioVolume.Mute = false;
+                        _silencedSessions.Add((session, wasMuted, volume));
                     }
                     catch { session.Dispose(); }
                 }
             }
-            catch { }
+            catch (Exception exception) { _reportError(exception); }
         }
 
         private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
@@ -298,7 +350,7 @@ internal sealed class SceneCaptureService : IAsyncDisposable
             try
             {
                 long now = Stopwatch.GetTimestamp();
-                if (now - _lastFrameTicks < Stopwatch.Frequency / 20) return;
+                if (now - _lastFrameTicks < Stopwatch.Frequency / CaptureFps) return;
                 _lastFrameTicks = now;
                 using SharpDX.Direct3D11.Texture2D source = GraphicsCaptureInterop.GetTexture(frame.Surface);
                 SharpDX.Direct3D11.DeviceContext context = _nativeDevice!.ImmediateContext;
@@ -307,40 +359,27 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                     _stagingTexture!, 0, SharpDX.Direct3D11.MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
                 try
                 {
-                    _publish(EncodeJpeg(mapped, frame.ContentSize.Width, frame.ContentSize.Height));
+                    long encodeStarted = Stopwatch.GetTimestamp();
+                    byte[] jpeg = _compressor.Compress(
+                        mapped.DataPointer,
+                        mapped.RowPitch,
+                        frame.ContentSize.Width,
+                        frame.ContentSize.Height,
+                        TJPixelFormat.BGRA,
+                        TJSubsamplingOption.Chrominance420,
+                        JpegQuality);
+                    double elapsed = Stopwatch.GetElapsedTime(encodeStarted).TotalMilliseconds;
+                    double previous = Volatile.Read(ref _encodeMilliseconds);
+                    Volatile.Write(ref _encodeMilliseconds, previous <= 0 ? elapsed : previous * 0.9 + elapsed * 0.1);
+                    _publish(jpeg);
                 }
                 finally
                 {
                     context.UnmapSubresource(_stagingTexture!, 0);
                 }
             }
-            catch { }
+            catch (Exception exception) { _reportError(exception); }
             finally { Monitor.Exit(_frameLock); }
-        }
-
-        private static byte[] EncodeJpeg(SharpDX.DataBox mapped, int width, int height)
-        {
-            using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            BitmapData data = bitmap.LockBits(
-                new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            try
-            {
-                int bytesPerRow = width * 4;
-                for (int y = 0; y < height; y++)
-                {
-                    nint source = mapped.DataPointer + y * mapped.RowPitch;
-                    nint destination = data.Scan0 + y * data.Stride;
-                    unsafe { Buffer.MemoryCopy((void*)source, (void*)destination, bytesPerRow, bytesPerRow); }
-                }
-            }
-            finally { bitmap.UnlockBits(data); }
-
-            using var output = new MemoryStream();
-            ImageCodecInfo encoder = ImageCodecInfo.GetImageEncoders().First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
-            using var parameters = new EncoderParameters(1);
-            parameters.Param[0] = new EncoderParameter(Encoder.Quality, 86L);
-            bitmap.Save(output, encoder, parameters);
-            return output.ToArray();
         }
 
         public async ValueTask DisposeAsync()
@@ -354,15 +393,82 @@ internal sealed class SceneCaptureService : IAsyncDisposable
                 _framePool?.Dispose();
                 _stagingTexture?.Dispose();
                 _nativeDevice?.Dispose();
+                _compressor.Dispose();
             }
-            foreach ((AudioSessionControl session, bool wasMuted) in _mutedSessions)
+            foreach ((AudioSessionControl session, bool wasMuted, float volume) in _silencedSessions)
             {
-                try { session.SimpleAudioVolume.Mute = wasMuted; } catch { }
+                try
+                {
+                    session.SimpleAudioVolume.Volume = volume;
+                    session.SimpleAudioVolume.Mute = wasMuted;
+                }
+                catch { }
                 session.Dispose();
             }
-            _mutedSessions.Clear();
+            _silencedSessions.Clear();
 
             await CloseWallpaperWindowAsync(_windowName);
+            await StopOwnedEngineProcessesAsync();
+        }
+
+        private async Task StopOwnedEngineProcessesAsync()
+        {
+            if (_ownedEngineProcesses.Count == 0) return;
+            await Task.Delay(350);
+            foreach (int processId in _ownedEngineProcesses)
+            {
+                try
+                {
+                    using Process process = Process.GetProcessById(processId);
+                    if (!process.HasExited &&
+                        (process.ProcessName.Equals("wallpaper64", StringComparison.OrdinalIgnoreCase) ||
+                         process.ProcessName.Equals("wallpaper32", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        process.Kill(entireProcessTree: false);
+                        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                    }
+                }
+                catch { }
+            }
+            _ownedEngineProcesses.Clear();
+        }
+
+        private static HashSet<int> GetWallpaperEngineProcessIds()
+        {
+            var processIds = new HashSet<int>();
+            foreach (string processName in new[] { "wallpaper64", "wallpaper32" })
+            {
+                foreach (Process process in Process.GetProcessesByName(processName))
+                {
+                    try { processIds.Add(process.Id); }
+                    finally { process.Dispose(); }
+                }
+            }
+            return processIds;
+        }
+
+        private static void ExcludeFromTaskbar(nint window)
+        {
+            const int GwlExStyle = -20;
+            const nint WsExToolWindow = 0x00000080;
+            const nint WsExAppWindow = 0x00040000;
+            const uint SwpNoSize = 0x0001;
+            const uint SwpNoZOrder = 0x0004;
+            const uint SwpNoActivate = 0x0010;
+            const uint SwpFrameChanged = 0x0020;
+            const int SwHide = 0;
+            const int SwShowNoActivate = 4;
+
+            try
+            {
+                _ = ShowWindow(window, SwHide);
+                nint style = GetWindowLongPtr(window, GwlExStyle);
+                _ = SetWindowLongPtr(window, GwlExStyle, (style | WsExToolWindow) & ~WsExAppWindow);
+                _ = ShowWindow(window, SwShowNoActivate);
+                _ = SetWindowPos(window, 0, -32000, -32000, 0, 0,
+                    SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
+            }
+            catch { }
         }
 
         private async Task CloseWallpaperWindowAsync(string windowName)
@@ -432,5 +538,19 @@ internal sealed class SceneCaptureService : IAsyncDisposable
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextLength(nint window);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+        private static extern nint GetWindowLongPtr(nint window, int index);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+        private static extern nint SetWindowLongPtr(nint window, int index, nint value);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(nint window, int command);
     }
 }
