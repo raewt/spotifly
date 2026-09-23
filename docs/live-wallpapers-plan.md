@@ -1,6 +1,6 @@
 # Live wallpaper runtime
 
-Status: implemented for Wallpaper Engine `video` and `web` projects.
+Status: implemented for installed Wallpaper Engine `video` and `web` projects.
 
 ## Current state
 
@@ -13,12 +13,15 @@ resumes when the window becomes visible and wallpaper mode is enabled.
 Wallpaper Engine projects are described by `project.json`. Spotifly can support
 these project types in stages:
 
-- `video`: stream the file referenced by `project.json` through the local host
-  with HTTP range support and use the existing muted video renderer.
+- `video`: convert H.264 MP4 once to a cached VP9/WebM file, then serve it with
+  HTTP range support to the existing muted video renderer. Conversion exposes
+  progress and cancellation and never runs during normal playback.
 - `web`: run the referenced HTML project in an isolated wallpaper frame and
   provide compatibility shims for Wallpaper Engine's JavaScript APIs.
-- `scene`: not directly compatible. Scene projects need Wallpaper Engine's own
-  renderer and downloaded projects are commonly packed as `scene.pkg`.
+- `scene`: intentionally hidden. Scene projects need Wallpaper Engine's own
+  renderer and downloaded projects are commonly packed as `scene.pkg`. Window
+  capture/MJPEG was tested and removed because it caused UI stalls and leaked
+  Wallpaper Engine windows.
 - `application`: not embedded for security and performance reasons.
 
 The import flow should only use Wallpaper Engine projects already installed by
@@ -62,6 +65,8 @@ on remote data.
 
 - Audio data is sent at about 30 updates per second.
 - No audio capture, decoding or animation while minimized.
+- No Wallpaper Engine process, hidden capture window or MJPEG stream.
+- Video playback reads only the prepared WebM cache.
 - One animation frame per spectrum update at most.
 - Release object URLs, decoders and audio capture sessions when changing a
   wallpaper.

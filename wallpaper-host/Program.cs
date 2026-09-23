@@ -33,10 +33,8 @@ internal static class Program
         catalog.Refresh();
 
         await using var audio = new AudioSpectrumService();
-        await using var scenes = new SceneCaptureService();
-        await using var videos = new VideoCaptureService();
-        await using var workshop = new SteamWorkshopService();
-        await using var server = new LocalServer(catalog, audio, scenes, videos, workshop, LaunchSpotifly);
+        await using var videoPreparation = new VideoPreparationService();
+        await using var server = new LocalServer(catalog, audio, videoPreparation, LaunchSpotifly);
         try
         {
             await server.StartAsync(shutdown.Token);

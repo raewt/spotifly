@@ -12,21 +12,17 @@ internal sealed class LocalServer : IAsyncDisposable
     public const string ApiToken = "spotifly-wallpaper-v1";
     private readonly WallpaperCatalog _catalog;
     private readonly AudioSpectrumService _audio;
-    private readonly SceneCaptureService _scenes;
-    private readonly VideoCaptureService _videos;
-    private readonly SteamWorkshopService _workshop;
+    private readonly VideoPreparationService _videoPreparation;
     private readonly Func<System.Diagnostics.Process?> _launchClient;
     private readonly HttpListener _listener = new();
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _listenLoop;
 
-    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, SceneCaptureService scenes, VideoCaptureService videos, SteamWorkshopService workshop, Func<System.Diagnostics.Process?> launchClient)
+    public LocalServer(WallpaperCatalog catalog, AudioSpectrumService audio, VideoPreparationService videoPreparation, Func<System.Diagnostics.Process?> launchClient)
     {
         _catalog = catalog;
         _audio = audio;
-        _scenes = scenes;
-        _videos = videos;
-        _workshop = workshop;
+        _videoPreparation = videoPreparation;
         _launchClient = launchClient;
         _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
     }
@@ -111,9 +107,9 @@ internal sealed class LocalServer : IAsyncDisposable
                 return;
             }
 
-            if (path.StartsWith("/workshop/", StringComparison.OrdinalIgnoreCase))
+            if (path.StartsWith("/import/", StringComparison.OrdinalIgnoreCase))
             {
-                await HandleWorkshopAssetAsync(context, path);
+                await HandleImportedVideoAsync(context, path);
                 return;
             }
 
@@ -129,37 +125,18 @@ internal sealed class LocalServer : IAsyncDisposable
     {
         if (path.Equals("/api/health", StringComparison.OrdinalIgnoreCase))
         {
+            WallpaperProject[] compatible = _catalog.Projects.Where(project => project.Type is "web" or "video").ToArray();
             await SendJsonAsync(context.Response, new
             {
                 ready = true,
-                version = "1.5.0",
+                version = "1.6.0",
                 projects = _catalog.Projects.Count,
-                supported = _catalog.Projects.Count(project => project.IsSupported),
+                compatible = compatible.Length,
+                scenesSkipped = _catalog.Projects.Count(project => project.Type == "scene"),
                 audioClients = _audio.ClientCount,
                 audioCapturing = _audio.IsCapturing,
                 visible = _audio.IsVisible,
-                steamAvailable = _workshop.IsAvailable,
-                scene = new
-                {
-                    activeProjectId = _scenes.ActiveProjectId,
-                    width = _scenes.CaptureWidth,
-                    height = _scenes.CaptureHeight,
-                    encodeMilliseconds = Math.Round(_scenes.EncodeMilliseconds, 2),
-                    frameBytes = _scenes.LatestFrame?.Length ?? 0,
-                    frameVersion = _scenes.FrameVersion,
-                    error = _scenes.LastError
-                },
-                video = new
-                {
-                    activeProjectId = _videos.ActiveProjectId,
-                    playing = _videos.IsPlaying,
-                    width = _videos.CaptureWidth,
-                    height = _videos.CaptureHeight,
-                    encodeMilliseconds = Math.Round(_videos.EncodeMilliseconds, 2),
-                    frameBytes = _videos.LatestFrame?.Length ?? 0,
-                    frameVersion = _videos.FrameVersion,
-                    error = _videos.LastError
-                }
+                converterAvailable = _videoPreparation.IsAvailable
             });
             return;
         }
@@ -171,59 +148,118 @@ internal sealed class LocalServer : IAsyncDisposable
                 _catalog.Refresh();
             }
 
-            HashSet<string> currentIds = _catalog.Projects.Select(project => project.Id).ToHashSet(StringComparer.Ordinal);
-            IReadOnlyList<WorkshopItem> subscribed = await _workshop.GetItemsAsync(
-                context.Request.QueryString["refresh"] == "1", currentIds, _shutdown.Token);
-            if (subscribed.Any(item => item.State == "installed" && !currentIds.Contains(item.Id)))
+            int scenesSkipped = _catalog.Projects.Count(project => project.Type == "scene");
+            var projects = _catalog.Projects
+                .Where(project => project.Type is "web" or "video")
+                .Select(project =>
             {
-                _catalog.Refresh();
-            }
-            Dictionary<string, WorkshopItem> subscribedById = subscribed.ToDictionary(item => item.Id, StringComparer.Ordinal);
-            var local = _catalog.Projects.Select(project =>
-            {
-                subscribedById.TryGetValue(project.Id, out WorkshopItem? item);
+                VideoPreparationSnapshot? preparation = project.Type == "video"
+                    ? _videoPreparation.GetProjectStatus(project)
+                    : null;
+                bool ready = project.Type == "web" || preparation?.State == "ready";
                 return new
                 {
                     id = project.Id,
                     title = project.Title,
                     type = project.Type,
-                    supported = project.IsSupported,
+                    supported = ready,
+                    preparable = project.Type == "video" && preparation?.State != "ready" && _videoPreparation.IsAvailable,
                     audio = project.SupportsAudio,
                     installed = true,
-                    downloadable = false,
-                    downloadState = item?.State ?? "installed",
-                    downloaded = item?.Downloaded ?? 0,
-                    total = item?.Total ?? 0,
+                    prepareState = preparation?.State ?? "ready",
+                    progress = preparation?.Progress ?? 100,
+                    processed = preparation?.ProcessedMilliseconds ?? 0,
+                    duration = preparation?.DurationMilliseconds ?? 0,
+                    error = preparation?.Error,
                     preview = project.PreviewFile is null ? null : $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/preview",
-                    entry = project.IsSupported ? BuildEntryUrl(project) : null
+                    entry = ready ? BuildEntryUrl(project) : null
                 };
             });
-            HashSet<string> localIds = _catalog.Projects.Select(project => project.Id).ToHashSet(StringComparer.Ordinal);
-            var remote = subscribed.Where(item => !localIds.Contains(item.Id)).Select(item => new
+            await SendJsonAsync(context.Response, new
             {
-                id = item.Id,
-                title = item.Title,
-                type = "remote",
-                supported = false,
-                audio = false,
-                installed = false,
-                downloadable = item.Available,
-                downloadState = item.State,
-                downloaded = item.Downloaded,
-                total = item.Total > 0 ? item.Total : item.FileSize,
-                preview = item.PreviewUrl is null ? null : $"http://127.0.0.1:{Port}/workshop/{Uri.EscapeDataString(item.Id)}/preview",
-                entry = (string?)null
+                projects,
+                scenesSkipped,
+                converterAvailable = _videoPreparation.IsAvailable
             });
-            await SendJsonAsync(context.Response, new { projects = local.Concat(remote), steamAvailable = _workshop.IsAvailable });
             return;
         }
 
-        if (path.StartsWith("/api/download/", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        if (path.StartsWith("/api/prepare/", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
         {
-            string id = Uri.UnescapeDataString(path["/api/download/".Length..]);
+            string id = Uri.UnescapeDataString(path["/api/prepare/".Length..]);
             bool cancel = context.Request.QueryString["cancel"] == "1";
-            bool accepted = cancel ? _workshop.CancelDownload(id) : _workshop.StartDownload(id);
-            await SendJsonAsync(context.Response, new { accepted, id, action = cancel ? "cancel" : "download" });
+            WallpaperProject? project = _catalog.Find(id);
+            bool accepted = project?.Type == "video" &&
+                (cancel ? _videoPreparation.Cancel(id) : _videoPreparation.StartProject(project));
+            await SendJsonAsync(context.Response, new { accepted, id, action = cancel ? "cancel" : "prepare" });
+            return;
+        }
+
+        if (path.Equals("/api/import", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        {
+            string? fileName = context.Request.QueryString["name"];
+            ImportedVideo? imported = await _videoPreparation.ImportAsync(context.Request.InputStream, fileName, _shutdown.Token);
+            if (imported is null)
+            {
+                await SendJsonAsync(context.Response, new { accepted = false, error = "Видеоконвертер недоступен" });
+                return;
+            }
+            await SendJsonAsync(context.Response, new
+            {
+                accepted = true,
+                id = imported.Id,
+                title = imported.Title,
+                entry = $"http://127.0.0.1:{Port}/import/{Uri.EscapeDataString(imported.Id)}/player"
+            });
+            return;
+        }
+
+        if (path.StartsWith("/api/import/", StringComparison.OrdinalIgnoreCase))
+        {
+            string id = Uri.UnescapeDataString(path["/api/import/".Length..]);
+            if (context.Request.HttpMethod == "POST" && context.Request.QueryString["cancel"] == "1")
+            {
+                await SendJsonAsync(context.Response, new { accepted = _videoPreparation.Cancel(id), id, action = "cancel" });
+                return;
+            }
+            VideoPreparationSnapshot status = _videoPreparation.GetImportedStatus(id);
+            ImportedVideo? imported = _videoPreparation.FindImported(id);
+            await SendJsonAsync(context.Response, new
+            {
+                id,
+                title = imported?.Title,
+                state = status.State,
+                progress = status.Progress,
+                processed = status.ProcessedMilliseconds,
+                duration = status.DurationMilliseconds,
+                error = status.Error,
+                entry = status.State == "ready" ? $"http://127.0.0.1:{Port}/import/{Uri.EscapeDataString(id)}/player" : null
+            });
+            return;
+        }
+
+        if (path.Equals("/api/window/drag/start", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        {
+            bool parsedX = int.TryParse(context.Request.QueryString["x"], out int x);
+            bool parsedY = int.TryParse(context.Request.QueryString["y"], out int y);
+            bool started = parsedX && parsedY && NativeWindowDrag.Begin(x, y);
+            await SendJsonAsync(context.Response, new { started });
+            return;
+        }
+
+        if (path.Equals("/api/window/drag/move", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        {
+            bool parsedX = int.TryParse(context.Request.QueryString["x"], out int x);
+            bool parsedY = int.TryParse(context.Request.QueryString["y"], out int y);
+            bool moved = parsedX && parsedY && NativeWindowDrag.Move(x, y);
+            await SendJsonAsync(context.Response, new { moved });
+            return;
+        }
+
+        if (path.Equals("/api/window/drag/end", StringComparison.OrdinalIgnoreCase) && context.Request.HttpMethod == "POST")
+        {
+            NativeWindowDrag.End();
+            await SendStatusAsync(context.Response, 204);
             return;
         }
 
@@ -231,23 +267,7 @@ internal sealed class LocalServer : IAsyncDisposable
         {
             using JsonDocument document = await JsonDocument.ParseAsync(context.Request.InputStream);
             bool visible = document.RootElement.TryGetProperty("visible", out JsonElement value) && value.ValueKind == JsonValueKind.True;
-            string? sceneId = document.RootElement.TryGetProperty("sceneId", out JsonElement sceneValue) && sceneValue.ValueKind == JsonValueKind.String
-                ? sceneValue.GetString()
-                : null;
-            string? videoId = document.RootElement.TryGetProperty("videoId", out JsonElement videoValue) && videoValue.ValueKind == JsonValueKind.String
-                ? videoValue.GetString()
-                : null;
-            WallpaperProject? scene = sceneId is null ? null : _catalog.Find(sceneId);
-            if (scene?.Type != "scene") scene = null;
-            WallpaperProject? video = videoId is null ? null : _catalog.Find(videoId);
-            if (video?.Type != "video") video = null;
-            if (video is not null && Path.GetExtension(video.EntryFile).Equals(".webm", StringComparison.OrdinalIgnoreCase))
-            {
-                video = null;
-            }
             _audio.SetVisible(visible);
-            await _scenes.SetActivityAsync(visible, scene);
-            await _videos.SetActivityAsync(visible, video);
             await SendStatusAsync(context.Response, 204);
             return;
         }
@@ -262,25 +282,38 @@ internal sealed class LocalServer : IAsyncDisposable
         await SendStatusAsync(context.Response, 404);
     }
 
-    private async Task HandleWorkshopAssetAsync(HttpListenerContext context, string path)
+    private async Task HandleImportedVideoAsync(HttpListenerContext context, string path)
     {
         string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length != 3 || !parts[2].Equals("preview", StringComparison.OrdinalIgnoreCase))
+        if (parts.Length != 3)
         {
             await SendStatusAsync(context.Response, 404);
             return;
         }
-        var preview = await _workshop.GetPreviewAsync(Uri.UnescapeDataString(parts[1]), _shutdown.Token);
-        if (preview is null)
+
+        string id = Uri.UnescapeDataString(parts[1]);
+        ImportedVideo? imported = _videoPreparation.FindImported(id);
+        VideoPreparationSnapshot status = _videoPreparation.GetImportedStatus(id);
+        if (imported is null || status.State != "ready" || !File.Exists(imported.OutputPath))
         {
             await SendStatusAsync(context.Response, 404);
             return;
         }
-        context.Response.ContentType = preview.Value.ContentType;
-        context.Response.Headers["Cache-Control"] = "public, max-age=3600";
-        context.Response.ContentLength64 = preview.Value.Bytes.Length;
-        await context.Response.OutputStream.WriteAsync(preview.Value.Bytes, _shutdown.Token);
-        context.Response.Close();
+
+        if (parts[2].Equals("player", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendVideoPlayerAsync(context.Response, $"/import/{Uri.EscapeDataString(id)}/video-file");
+            return;
+        }
+        if (parts[2].Equals("video-file", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.ContentType = "video/webm";
+            context.Response.Headers["Cache-Control"] = "public, max-age=3600";
+            await SendFileAsync(context, imported.OutputPath);
+            return;
+        }
+
+        await SendStatusAsync(context.Response, 404);
     }
 
     private async Task HandleWallpaperFileAsync(HttpListenerContext context, string path)
@@ -303,53 +336,30 @@ internal sealed class LocalServer : IAsyncDisposable
 
         if (action.Equals("player", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
         {
-            await SendVideoPlayerAsync(context.Response, project);
+            string? preparedPath = _videoPreparation.GetPreparedProjectPath(project);
+            if (preparedPath is null)
+            {
+                await SendStatusAsync(context.Response, 409);
+                return;
+            }
+            await SendVideoPlayerAsync(
+                context.Response,
+                $"/wallpaper/{Uri.EscapeDataString(project.Id)}/video-file");
             return;
         }
 
         if (action.Equals("video-file", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
         {
-            string? videoPath = WallpaperCatalog.SafeCombine(project.RootPath, project.EntryFile);
+            string? videoPath = _videoPreparation.GetPreparedProjectPath(project);
             if (videoPath is null || !File.Exists(videoPath))
             {
                 await SendStatusAsync(context.Response, 404);
                 return;
             }
 
-            context.Response.ContentType = MimeType(Path.GetExtension(videoPath).ToLowerInvariant());
+            context.Response.ContentType = "video/webm";
             context.Response.Headers["Cache-Control"] = "public, max-age=3600";
             await SendFileAsync(context, videoPath);
-            return;
-        }
-
-        if (action.Equals("video", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
-        {
-            if (Path.GetExtension(project.EntryFile).Equals(".webm", StringComparison.OrdinalIgnoreCase))
-            {
-                await SendVideoPlayerAsync(context.Response, project);
-            }
-            else
-            {
-                await SendStreamPlayerAsync(context.Response, project, "video-stream");
-            }
-            return;
-        }
-
-        if (action.Equals("video-stream", StringComparison.OrdinalIgnoreCase) && project.Type == "video")
-        {
-            await SendVideoStreamAsync(context, project);
-            return;
-        }
-
-        if (action.Equals("scene", StringComparison.OrdinalIgnoreCase) && project.Type == "scene")
-        {
-            await SendScenePlayerAsync(context.Response, project);
-            return;
-        }
-
-        if (action.Equals("scene-stream", StringComparison.OrdinalIgnoreCase) && project.Type == "scene")
-        {
-            await SendSceneStreamAsync(context, project);
             return;
         }
 
@@ -478,11 +488,7 @@ internal sealed class LocalServer : IAsyncDisposable
     {
         if (project.Type == "video")
         {
-            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/video";
-        }
-        if (project.Type == "scene")
-        {
-            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/scene";
+            return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/player";
         }
 
         string escapedPath = string.Join('/', project.EntryFile
@@ -492,15 +498,9 @@ internal sealed class LocalServer : IAsyncDisposable
         return $"http://127.0.0.1:{Port}/wallpaper/{Uri.EscapeDataString(project.Id)}/files/{escapedPath}";
     }
 
-    private static async Task SendVideoPlayerAsync(HttpListenerResponse response, WallpaperProject project)
+    private static async Task SendVideoPlayerAsync(HttpListenerResponse response, string source)
     {
-        string escapedPath = string.Join('/', project.EntryFile
-            .Replace('\\', '/')
-            .Split('/', StringSplitOptions.RemoveEmptyEntries)
-            .Select(Uri.EscapeDataString));
-        string source = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/files/{escapedPath}";
         string sourceJson = JsonSerializer.Serialize(source);
-        string mimeJson = JsonSerializer.Serialize(MimeType(Path.GetExtension(project.EntryFile).ToLowerInvariant()));
         string html = $$$"""
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -517,7 +517,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-p
   const reportError=message=>parent.postMessage({type:'spotifly:wallpaper-error',message},'*');
   const armTimeout=()=>{clearTimeout(timeout);if(active&&!ready)timeout=setTimeout(()=>reportError('VIDEO не загрузилось за 12 секунд'),12000)};
   const sync=()=>{mute();if(active&&!document.hidden){armTimeout();video.play().catch(error=>reportError('VIDEO: '+(error&&error.message||'воспроизведение заблокировано')))}else{clearTimeout(timeout);video.pause()}};
-  if(!video.canPlayType({{{mimeJson}}}))reportError('Этот видеоформат не поддерживается встроенным Chromium');
+  if(!video.canPlayType('video/webm; codecs="vp9"'))reportError('Встроенный Chromium не поддерживает VP9');
   video.src={{{sourceJson}}};
   video.load();
   video.addEventListener('volumechange',mute);
@@ -538,101 +538,6 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-p
 """;
         response.Headers["Cache-Control"] = "no-store";
         await SendTextAsync(response, html, "text/html; charset=utf-8");
-    }
-
-    private static async Task SendScenePlayerAsync(HttpListenerResponse response, WallpaperProject project)
-    {
-        await SendStreamPlayerAsync(response, project, "scene-stream");
-    }
-
-    private static async Task SendStreamPlayerAsync(HttpListenerResponse response, WallpaperProject project, string streamAction)
-    {
-        string stream = $"/wallpaper/{Uri.EscapeDataString(project.Id)}/{streamAction}";
-        string streamJson = JsonSerializer.Serialize(stream);
-        string html = $$"""
-<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;background:transparent}
-</style></head><body><img id="wall" alt="">
-<script>
-(()=>{
- const image=document.getElementById('wall'),source={{streamJson}};let active=true;
- const sync=()=>{if(active&&!document.hidden){if(!image.src)image.src=source+'?v='+Date.now()} else {image.removeAttribute('src')} };
- image.addEventListener('load',()=>parent.postMessage({type:'spotifly:wallpaper-ready'},'*'));
- image.addEventListener('error',()=>{if(active)setTimeout(sync,1200)});
- addEventListener('message',event=>{const data=event.data||{};
-   if(data.type==='spotifly:visibility'){active=!!data.visible;sync()}
-   if(data.type==='spotifly:layout'){image.style.objectFit=data.fit==='contain'?'contain':data.fit==='fill'?'fill':'cover';image.style.objectPosition=(Number(data.x)||50)+'% '+(Number(data.y)||50)+'%'}
- });
- document.addEventListener('visibilitychange',sync);sync();
-})();
-</script></body></html>
-""";
-        response.Headers["Cache-Control"] = "no-store";
-        await SendTextAsync(response, html, "text/html; charset=utf-8");
-    }
-
-    private async Task SendVideoStreamAsync(HttpListenerContext context, WallpaperProject project)
-    {
-        if (!await _videos.EnsureStartedAsync(project, _shutdown.Token))
-        {
-            await SendStatusAsync(context.Response, 503);
-            return;
-        }
-
-        await SendMjpegStreamAsync(
-            context.Response,
-            () => _videos.FrameVersion,
-            version => _videos.WaitForFrameAsync(version, _shutdown.Token),
-            () => _videos.LatestFrame);
-    }
-
-    private async Task SendSceneStreamAsync(HttpListenerContext context, WallpaperProject project)
-    {
-        if (!await _scenes.EnsureStartedAsync(project, _shutdown.Token))
-        {
-            await SendStatusAsync(context.Response, 503);
-            return;
-        }
-
-        await SendMjpegStreamAsync(
-            context.Response,
-            () => _scenes.FrameVersion,
-            version => _scenes.WaitForFrameAsync(version, _shutdown.Token),
-            () => _scenes.LatestFrame);
-    }
-
-    private async Task SendMjpegStreamAsync(
-        HttpListenerResponse response,
-        Func<long> currentVersion,
-        Func<long, Task<long>> waitForFrame,
-        Func<byte[]?> latestFrame)
-    {
-        response.ContentType = "multipart/x-mixed-replace; boundary=spotiflyframe";
-        response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
-        response.SendChunked = true;
-        long version = currentVersion() - 1;
-        try
-        {
-            await using Stream output = response.OutputStream;
-            while (!_shutdown.IsCancellationRequested)
-            {
-                version = await waitForFrame(version);
-                byte[]? frame = latestFrame();
-                if (frame is null) continue;
-                byte[] header = Encoding.ASCII.GetBytes(
-                    $"--spotiflyframe\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
-                await output.WriteAsync(header, _shutdown.Token);
-                await output.WriteAsync(frame, _shutdown.Token);
-                await output.WriteAsync("\r\n"u8.ToArray(), _shutdown.Token);
-                await output.FlushAsync(_shutdown.Token);
-            }
-        }
-        catch (Exception exception) when (exception is IOException or HttpListenerException or OperationCanceledException)
-        {
-        }
     }
 
     private static bool IsAuthorized(HttpListenerRequest request) =>

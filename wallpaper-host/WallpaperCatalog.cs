@@ -14,7 +14,7 @@ internal sealed record WallpaperProject(
     bool SupportsAudio,
     Dictionary<string, object?> Properties)
 {
-    public bool IsSupported => Type is "video" or "web" or "scene";
+    public bool IsSupported => Type is "video" or "web";
 }
 
 internal sealed class WallpaperCatalog

@@ -606,6 +606,31 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
 
 .sf-we-open:active { transform: scale(.98); }
 
+#sf-local-video {
+  display: none;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sf-ink) 7%, transparent);
+  font-size: 10px;
+}
+
+#sf-local-video.is-visible { display: grid; }
+#sf-local-video > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sf-local-video > div {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--sf-ink) 10%, transparent);
+}
+#sf-local-video i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--sf-accent); transition: width .2s ease; }
+#sf-local-video button { border: 0; background: transparent; color: var(--sf-ink); font-size: 9px; font-weight: 700; cursor: pointer; }
+
 #sf-we-modal {
   position: fixed;
   inset: 0;
@@ -680,7 +705,7 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
 
 .sf-we-tools {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 0 20px 10px;
@@ -772,14 +797,6 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
   cursor: not-allowed;
   filter: saturate(.65);
 }
-
-.sf-we-card.is-downloadable {
-  opacity: 1;
-  cursor: default;
-  filter: none;
-}
-
-.sf-we-card.is-downloadable:hover { transform: none; }
 
 .sf-we-download {
   display: grid;
@@ -894,7 +911,6 @@ html.sf-theme:not(.sf-original) [data-testid="now-playing-view"] .encore-dark-th
   #sf-we-modal { padding: 12px; }
   .sf-we-dialog { width: calc(100vw - 24px); height: calc(100vh - 24px); }
   .sf-we-tools { grid-template-columns: 1fr auto; }
-  .sf-we-tools label { grid-column: 1 / -1; grid-row: 2; }
   #sf-we-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
 }
 

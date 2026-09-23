@@ -4,22 +4,13 @@ NAudio.Core and NAudio.Wasapi 2.2.1
 Copyright (c) 2023 Mark Heath
 https://github.com/naudio/NAudio
 
-SharpDX 4.2.0
-Copyright (c) 2010-2019 SharpDX - Alexandre Mutel
-https://github.com/sharpdx/SharpDX
-
-Quamotion.TurboJpegWrapper 2.0.32
-Copyright (c) Autonomic Systems and Quamotion
-https://github.com/quamotion/AS.TurboJpegWrapper
-
-libjpeg-turbo
-Copyright (c) 2009-2022 D. R. Commander and contributors
-https://github.com/libjpeg-turbo/libjpeg-turbo
-Distributed under the IJG and modified BSD licenses included with the package.
-
-Steamworks.NET 2024.8.0
-Copyright (c) Riley Labrecque
-https://github.com/rlabrecque/Steamworks.NET
+FFmpeg 8.1.1 essentials build
+Copyright (c) 2000-2026 the FFmpeg developers
+https://ffmpeg.org/
+Windows build: https://www.gyan.dev/ffmpeg/builds/
+Distributed under GNU GPL version 3. The complete license is installed as
+FFMPEG-LICENSE.txt. Corresponding source is available from
+https://ffmpeg.org/releases/ffmpeg-8.1.1.tar.xz
 
 .NET Runtime 8
 Copyright (c) .NET Foundation and Contributors

@@ -72,8 +72,8 @@ try {
   if (-not $packedTheme.Contains('openWallpaperBrowser') -or -not $packedTheme.Contains('/api/activity')) {
     throw 'Wallpaper Engine integration is missing from packed xpui.spa'
   }
-  if (-not $packedTheme.Contains('/api/download/') -or -not $packedTheme.Contains('wallpaperFit')) {
-    throw 'Wallpaper Engine downloads or layout controls are missing from packed xpui.spa'
+  if (-not $packedTheme.Contains('/api/prepare/') -or -not $packedTheme.Contains('importLocalVideo') -or -not $packedTheme.Contains('wallpaperFit')) {
+    throw 'Stable video preparation or layout controls are missing from packed xpui.spa'
   }
   if (@($verification.Entries | Where-Object { $_.FullName.Contains('\') }).Count -ne 0) {
     throw 'xpui.spa contains Windows path separators'
